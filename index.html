@@ -37,7 +37,7 @@
     }
     #art div { position: absolute; left: 0; white-space: pre; }
     #art b { display: inline-block; font-weight: 400; }
-    #art ::selection { background: rgba(232, 218, 181, 0.85); color: #080d10; }
+    #art ::selection { background: rgba(232, 218, 181, 0.22); }
     footer {
       position: fixed;
       right: max(18px, env(safe-area-inset-right));
@@ -73,6 +73,7 @@
     const FAMILY = 'Georgia, "Times New Roman", serif';
     const TINTS = ['104,156,164', '147,183,179', '190,206,190', '218,209,173', '232,194,134', '239,222,184'];
     const SHADES = 10;
+    const CELLS = 16000;
     let width, height, fontSize, cellW, cellH, cols, rows;
     let palette = [], cells = [], gaps = [], lines = [], frame = 0, last = 0, time = 0;
     let scale, centerX, centerY, angle, yaw, pitch, depth, positionX, positionY;
@@ -130,7 +131,13 @@
     // costs one string per row instead of thousands of style computations.
     function buildMarkup() {
       const rules = [`#art{font:${fontSize}px/${cellH}px ${FAMILY}}`, `#art b{width:${cellW}px}`];
-      for (let run = 1; run <= cols; run++) rules.push(`#art b.g${run}{width:${run * cellW}px}`);
+      // Spacing the blanks out to a full cell each keeps a selection dragged
+      // across empty water aligned with the columns it covers.
+      measure.font = `normal 400 ${fontSize}px ${FAMILY}`;
+      const blank = cellW - measure.measureText(' ').width;
+      for (let run = 1; run <= cols; run++) {
+        rules.push(`#art b.g${run}{width:${run * cellW}px;letter-spacing:${blank}px}`);
+      }
       for (let face = 0; face < faces.length; face++) {
         for (let tint = 0; tint < TINTS.length; tint++) {
           for (let shade = 0; shade < SHADES; shade++) {
@@ -174,7 +181,10 @@
     function resize() {
       width = innerWidth;
       height = innerHeight;
-      fontSize = clamp(width / 120, 7, 13);
+      // Real glyphs cost style, layout and paint, so the grid answers to a
+      // cell budget rather than to the display: a larger screen is given
+      // larger type instead of more boxes to lay out on every frame.
+      fontSize = clamp(Math.max(width / 120, Math.sqrt(width * height / (0.66 * 1.02 * CELLS))), 7, 20);
       // Layout engines keep lengths in 1/64 of a pixel. Cells that land on
       // that grid exactly cannot accumulate rounding error across a row.
       cellW = Math.round(fontSize * 0.66 * 64) / 64;
@@ -579,11 +589,21 @@
       }
     }
 
+    // A moving picture cannot be read, let alone selected: each frame replaces
+    // the rows a selection points at. So the fish holds still while it is held
+    // or while any of its characters are selected, and swims on when released.
+    let grabbed = false;
+    function still() {
+      if (grabbed) return true;
+      const selection = getSelection();
+      return !!selection && !selection.isCollapsed && art.contains(selection.anchorNode);
+    }
+
     function animate(now) {
       if (!last) last = now;
       const delta = Math.min((now - last) / 1000, 0.05);
       last = now;
-      if (!motion.matches) {
+      if (!motion.matches && !still()) {
         time += delta;
         updatePilot(delta);
         draw();
@@ -604,8 +624,13 @@
       }
     }
 
+    addEventListener('pointerdown', () => { grabbed = true; }, { passive: true });
+    for (const event of ['pointerup', 'pointercancel']) {
+      addEventListener(event, () => { grabbed = false; }, { passive: true });
+    }
+
     addEventListener('pointermove', event => {
-      if (event.pointerType === 'touch' || motion.matches) return;
+      if (event.pointerType === 'touch' || motion.matches || grabbed) return;
       const x = clamp(event.clientX / width * 2 - 1, -1, 1);
       const y = clamp(event.clientY / height * 2 - 1, -1, 1);
       if (pointer.seen && Math.hypot((x - pointer.x) * width / 2, (y - pointer.y) * height / 2) < 1.5) return;
