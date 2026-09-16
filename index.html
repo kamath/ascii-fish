@@ -30,12 +30,12 @@
       position: fixed; inset: 0; margin: 0; overflow: hidden;
       height: 100%; height: 100dvh;
       background: #080d10;
-      /* Every glyph sits in a box exactly one cell wide, so proportional type
-         stays on the grid while the characters remain real, selectable text. */
       contain: strict;
       -webkit-text-size-adjust: none;
     }
     #art div { position: absolute; left: 0; white-space: pre; }
+    /* Every glyph sits in a box exactly one cell wide, so proportional type
+       stays on the grid while the characters remain real, selectable text. */
     #art b { display: inline-block; font-weight: 400; }
     #art ::selection { background: rgba(232, 218, 181, 0.22); }
     footer {
@@ -84,6 +84,7 @@
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const mix = (a, b, t) => a + (b - a) * t;
     const pointer = { x: 0, y: 0, smoothX: 0, smoothY: 0, movedAt: -Infinity, seen: false };
+    let grabbed = false;
     const tilt = { listening: false, pending: false, permission: 'unknown', neutral: null, strength: 0 };
     const pilot = {
       active: false, influence: 0, offset: [0, 0, 0], velocity: [0, 0, 0],
@@ -94,7 +95,7 @@
     for (const weight of [400, 600, 800]) {
       for (const style of ['normal', 'italic']) faces.push({ weight, style });
     }
-    const escape = char => char === '<' ? '&lt;' : char === '>' ? '&gt;' : char === '&' ? '&amp;' : char;
+    const entity = char => char === '<' ? '&lt;' : char === '>' ? '&gt;' : char === '&' ? '&amp;' : char;
 
     function buildType() {
       const candidates = [];
@@ -153,7 +154,7 @@
       for (let level = 0; level < 48; level++) {
         for (let variant = 0; variant < 4; variant++) {
           const glyph = palette[level][variant];
-          const text = escape(glyph.char);
+          const text = entity(glyph.char);
           for (let tint = 0; tint < TINTS.length; tint++) {
             for (let shade = 0; shade < SHADES; shade++) {
               cells[((level * 4 + variant) * TINTS.length + tint) * SHADES + shade] =
@@ -592,11 +593,11 @@
     // A moving picture cannot be read, let alone selected: each frame replaces
     // the rows a selection points at. So the fish holds still while it is held
     // or while any of its characters are selected, and swims on when released.
-    let grabbed = false;
     function still() {
       if (grabbed) return true;
       const selection = getSelection();
-      return !!selection && !selection.isCollapsed && art.contains(selection.anchorNode);
+      return !!selection && !selection.isCollapsed &&
+        (art.contains(selection.anchorNode) || art.contains(selection.focusNode));
     }
 
     function animate(now) {
@@ -673,6 +674,7 @@
 
     const releasePointer = () => {
       pointer.movedAt = -Infinity;
+      grabbed = false;
       tilt.strength = 0;
       tilt.neutral = null;
     };
