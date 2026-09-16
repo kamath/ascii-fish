@@ -26,7 +26,18 @@
   <style>
     * { box-sizing: border-box; }
     html, body { width: 100%; height: 100%; min-height: 100dvh; margin: 0; overflow: hidden; background: #080d10; color-scheme: dark; }
-    canvas { position: fixed; inset: 0; display: block; width: 100%; height: 100%; height: 100dvh; background: #080d10; }
+    #art {
+      position: fixed; inset: 0; margin: 0; overflow: hidden;
+      height: 100%; height: 100dvh;
+      background: #080d10;
+      contain: strict;
+      -webkit-text-size-adjust: none;
+    }
+    #art div { position: absolute; left: 0; white-space: pre; }
+    /* Every glyph sits in a box exactly one cell wide, so proportional type
+       stays on the grid while the characters remain real, selectable text. */
+    #art b { display: inline-block; font-weight: 400; }
+    #art ::selection { background: rgba(232, 218, 181, 0.22); }
     footer {
       position: fixed;
       right: max(18px, env(safe-area-inset-right));
@@ -39,7 +50,7 @@
   </style>
 </head>
 <body>
-  <canvas aria-label="A single gold-and-silver ASCII fish glides diagonally through the dark, turning and swimming toward and away from the viewer." role="img"></canvas>
+  <pre id="art" role="img" aria-label="A single gold-and-silver ASCII fish glides diagonally through the dark, turning and swimming toward and away from the viewer."></pre>
   <footer>Made with &lt;3 by <a href="https://kamath.io" target="_blank" rel="noopener noreferrer">Anirudh Kamath</a></footer>
   <script>
   (() => {
@@ -47,9 +58,11 @@
 
     // Inspired by chenglou.me/pretext/variable-typographic-ascii/:
     // measure proportional glyphs, then match their ink density AND width
-    // to a moving light field. Everything displayed here is a text glyph.
-    const canvas = document.querySelector('canvas');
-    const ctx = canvas.getContext('2d', { alpha: false });
+    // to a moving light field. Everything displayed here is a text glyph —
+    // the page paints no pixels of its own, so the fish can be selected,
+    // copied and pasted as the characters it is made of.
+    const art = document.getElementById('art');
+    const sheet = document.head.appendChild(document.createElement('style'));
     const field = document.createElement('canvas');
     const ink = field.getContext('2d', { willReadFrequently: true });
     const probe = document.createElement('canvas');
@@ -57,9 +70,12 @@
     const measure = probe.getContext('2d', { willReadFrequently: true });
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
     const TAU = Math.PI * 2;
-    const BG = '#080d10';
-    let width, height, pixelRatio, fontSize, cellW, cellH, cols, rows;
-    let palette = [], atlas, tileW, tileH, frame = 0, last = 0, time = 0;
+    const FAMILY = 'Georgia, "Times New Roman", serif';
+    const TINTS = ['104,156,164', '147,183,179', '190,206,190', '218,209,173', '232,194,134', '239,222,184'];
+    const SHADES = 10;
+    const CELLS = 16000;
+    let width, height, fontSize, cellW, cellH, cols, rows;
+    let palette = [], cells = [], gaps = [], lines = [], frame = 0, last = 0, time = 0;
     let scale, centerX, centerY, angle, yaw, pitch, depth, positionX, positionY;
     let cy, sy, cp, sp, cr, sr;
     let scene = [];
@@ -68,29 +84,33 @@
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const mix = (a, b, t) => a + (b - a) * t;
     const pointer = { x: 0, y: 0, smoothX: 0, smoothY: 0, movedAt: -Infinity, seen: false };
+    let grabbed = false;
     const tilt = { listening: false, pending: false, permission: 'unknown', neutral: null, strength: 0 };
     const pilot = {
       active: false, influence: 0, offset: [0, 0, 0], velocity: [0, 0, 0],
       yaw: 0, pitch: 0, yawRate: TAU / orbitDuration, pitchRate: 0
     };
 
+    const faces = [];
+    for (const weight of [400, 600, 800]) {
+      for (const style of ['normal', 'italic']) faces.push({ weight, style });
+    }
+    const entity = char => char === '<' ? '&lt;' : char === '>' ? '&gt;' : char === '&' ? '&amp;' : char;
+
     function buildType() {
       const candidates = [];
       const chars = '.`,:;\'"-~=+<>/\\|(){}[]iltrsvxYJLcoauwnzO0QXMW@&#%8';
-      for (const weight of [400, 600, 800]) {
-        for (const style of ['normal', 'italic']) {
-          const font = `${style} ${weight} ${fontSize}px Georgia, "Times New Roman", serif`;
-          measure.font = font;
-          for (const char of chars) {
-            const advance = measure.measureText(char).width;
-            measure.clearRect(0, 0, 40, 40);
-            measure.fillStyle = '#fff';
-            measure.fillText(char, 8, 24);
-            const pixels = measure.getImageData(0, 0, 40, 40).data;
-            let area = 0;
-            for (let i = 3; i < pixels.length; i += 4) area += pixels[i] / 255;
-            candidates.push({ char, font, advance, density: area / (cellW * fontSize) });
-          }
+      for (let face = 0; face < faces.length; face++) {
+        measure.font = `${faces[face].style} ${faces[face].weight} ${fontSize}px ${FAMILY}`;
+        for (const char of chars) {
+          const advance = measure.measureText(char).width;
+          measure.clearRect(0, 0, 40, 40);
+          measure.fillStyle = '#fff';
+          measure.fillText(char, 8, 24);
+          const pixels = measure.getImageData(0, 0, 40, 40).data;
+          let area = 0;
+          for (let i = 3; i < pixels.length; i += 4) area += pixels[i] / 255;
+          candidates.push({ char, face, advance, density: area / (cellW * fontSize) });
         }
       }
       const maxDensity = Math.max(...candidates.map(g => g.density));
@@ -105,47 +125,77 @@
         const distinct = ranked.filter((entry, i, all) => all.findIndex(other => other.glyph.char === entry.glyph.char) === i);
         palette.push(distinct.slice(0, 4).map(entry => entry.glyph));
       }
+      buildMarkup();
+    }
 
-      // Cache the measured type as a small sprite sheet, so the animation
-      // needs no per-frame DOM mutations or thousands of font rasterizations.
-      tileW = Math.ceil(fontSize * 1.8 * pixelRatio);
-      tileH = Math.ceil(fontSize * 1.6 * pixelRatio);
-      atlas = document.createElement('canvas');
-      atlas.width = tileW * 48;
-      atlas.height = tileH * 4 * 6;
-      const a = atlas.getContext('2d');
-      const colors = [[104, 156, 164], [147, 183, 179], [190, 206, 190], [218, 209, 173], [232, 194, 134], [239, 222, 184]];
-      for (let color = 0; color < colors.length; color++) {
-        for (let level = 0; level < 48; level++) {
-          for (let variant = 0; variant < 4; variant++) {
-            const glyph = palette[level][variant];
-            a.save();
-            a.translate(level * tileW + tileW / 2, (color * 4 + variant) * tileH + tileH * 0.73);
-            a.scale(pixelRatio, pixelRatio);
-            a.font = glyph.font;
-            a.textAlign = 'center';
-            a.fillStyle = `rgb(${colors[color].join(',')})`;
-            a.fillText(glyph.char, 0, 0);
-            a.restore();
+    // The type is cached as CSS classes and ready-made markup, so a frame
+    // costs one string per row instead of thousands of style computations.
+    function buildMarkup() {
+      const rules = [`#art{font:${fontSize}px/${cellH}px ${FAMILY}}`, `#art b{width:${cellW}px}`];
+      // Spacing the blanks out to a full cell each keeps a selection dragged
+      // across empty water aligned with the columns it covers.
+      measure.font = `normal 400 ${fontSize}px ${FAMILY}`;
+      const blank = cellW - measure.measureText(' ').width;
+      for (let run = 1; run <= cols; run++) {
+        rules.push(`#art b.g${run}{width:${run * cellW}px;letter-spacing:${blank}px}`);
+      }
+      for (let face = 0; face < faces.length; face++) {
+        for (let tint = 0; tint < TINTS.length; tint++) {
+          for (let shade = 0; shade < SHADES; shade++) {
+            rules.push(`#art b.k${(face * TINTS.length + tint) * SHADES + shade}` +
+              `{font-weight:${faces[face].weight};font-style:${faces[face].style};` +
+              `color:rgba(${TINTS[tint]},${(shade + 1) / SHADES})}`);
           }
         }
       }
+      sheet.textContent = rules.join('');
+
+      cells = new Array(48 * 4 * TINTS.length * SHADES);
+      for (let level = 0; level < 48; level++) {
+        for (let variant = 0; variant < 4; variant++) {
+          const glyph = palette[level][variant];
+          const text = entity(glyph.char);
+          for (let tint = 0; tint < TINTS.length; tint++) {
+            for (let shade = 0; shade < SHADES; shade++) {
+              cells[((level * 4 + variant) * TINTS.length + tint) * SHADES + shade] =
+                `<b class=k${(glyph.face * TINTS.length + tint) * SHADES + shade}>${text}</b>`;
+            }
+          }
+        }
+      }
+      // Unlit cells are spaces, held to width by a single box per run, so a
+      // copied line keeps the picture's shape instead of collapsing to ink.
+      gaps = new Array(cols + 1);
+      for (let run = 1; run <= cols; run++) gaps[run] = `<b class=g${run}>${' '.repeat(run)}</b>`;
+    }
+
+    function buildLines() {
+      while (art.childElementCount > rows) art.lastElementChild.remove();
+      while (art.childElementCount < rows) art.appendChild(document.createElement('div'));
+      lines = Array.from(art.children, (node, row) => {
+        node.style.top = `${row * cellH}px`;
+        node.textContent = '';
+        return { node, html: '' };
+      });
     }
 
     function resize() {
       width = innerWidth;
       height = innerHeight;
-      pixelRatio = Math.min(devicePixelRatio || 1, 2);
-      canvas.width = Math.round(width * pixelRatio);
-      canvas.height = Math.round(height * pixelRatio);
-      fontSize = clamp(width / 175, 4.2, 10);
-      cellW = fontSize * 0.66;
-      cellH = fontSize * 1.02;
+      // Real glyphs cost style, layout and paint, so the grid answers to a
+      // cell budget rather than to the display: a larger screen is given
+      // larger type instead of more boxes to lay out on every frame.
+      fontSize = clamp(Math.max(width / 120, Math.sqrt(width * height / (0.66 * 1.02 * CELLS))), 7, 20);
+      // Layout engines keep lengths in 1/64 of a pixel. Cells that land on
+      // that grid exactly cannot accumulate rounding error across a row.
+      cellW = Math.round(fontSize * 0.66 * 64) / 64;
+      cellH = Math.round(fontSize * 1.02 * 64) / 64;
       cols = Math.ceil(width / cellW);
       rows = Math.ceil(height / cellH);
       field.width = cols * 3;
       field.height = rows * 3;
       buildType();
+      buildLines();
       fitCourse();
       draw();
     }
@@ -503,12 +553,8 @@
     function draw() {
       drawField();
       const pixels = ink.getImageData(0, 0, field.width, field.height).data;
-      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = BG;
-      ctx.fillRect(0, 0, width, height);
-      const dw = tileW / pixelRatio, dh = tileH / pixelRatio;
       for (let row = 0; row < rows; row++) {
+        let html = '', gap = 0;
         for (let col = 0; col < cols; col++) {
           // Supersampling preserves the fine fin rays between glyph centers.
           let r = 0, g = 0, b = 0;
@@ -520,25 +566,45 @@
           }
           r /= 9; g /= 9; b /= 9;
           const brightness = (r * 0.25 + g * 0.60 + b * 0.15) / 255;
-          if (brightness < 0.022) continue;
+          if (brightness < 0.022) { gap++; continue; }
           const level = clamp(Math.round(Math.pow(brightness, 0.64) * 47), 0, 47);
           const variant = ((col * 73 ^ row * 151) >>> 0) % 4;
-          let color = r > g * 1.15 ? 4 : r > b * 1.22 ? 3 : g > r * 1.12 ? 0 : 2;
-          if (brightness > 0.74) color = 5;
-          if (color === 0 && brightness > 0.37) color = 1;
-          ctx.globalAlpha = clamp(0.48 + brightness * 0.85, 0, 1) * Math.min(1, brightness / 0.075);
-          ctx.drawImage(atlas, level * tileW, (color * 4 + variant) * tileH, tileW, tileH,
-            (col + 0.5) * cellW - dw / 2, (row + 0.55) * cellH - dh * 0.55, dw, dh);
+          let tint = r > g * 1.15 ? 4 : r > b * 1.22 ? 3 : g > r * 1.12 ? 0 : 2;
+          if (brightness > 0.74) tint = 5;
+          if (tint === 0 && brightness > 0.37) tint = 1;
+          const opacity = clamp(0.48 + brightness * 0.85, 0, 1) * Math.min(1, brightness / 0.075);
+          const shade = clamp(Math.ceil(opacity * SHADES) - 1, 0, SHADES - 1);
+          if (gap) { html += gaps[gap]; gap = 0; }
+          html += cells[((level * 4 + variant) * TINTS.length + tint) * SHADES + shade];
+        }
+        // A literal newline ends each row, so a selection copied out of the
+        // page arrives as lines of ASCII rather than one endless string.
+        html += '\n';
+        // Most rows repeat between frames; rewriting only the changed ones
+        // keeps the parser and the layout engine off the critical path.
+        const line = lines[row];
+        if (line.html !== html) {
+          line.node.innerHTML = html;
+          line.html = html;
         }
       }
-      ctx.globalAlpha = 1;
+    }
+
+    // A moving picture cannot be read, let alone selected: each frame replaces
+    // the rows a selection points at. So the fish holds still while it is held
+    // or while any of its characters are selected, and swims on when released.
+    function still() {
+      if (grabbed) return true;
+      const selection = getSelection();
+      return !!selection && !selection.isCollapsed &&
+        (art.contains(selection.anchorNode) || art.contains(selection.focusNode));
     }
 
     function animate(now) {
       if (!last) last = now;
       const delta = Math.min((now - last) / 1000, 0.05);
       last = now;
-      if (!motion.matches) {
+      if (!motion.matches && !still()) {
         time += delta;
         updatePilot(delta);
         draw();
@@ -559,8 +625,13 @@
       }
     }
 
+    addEventListener('pointerdown', () => { grabbed = true; }, { passive: true });
+    for (const event of ['pointerup', 'pointercancel']) {
+      addEventListener(event, () => { grabbed = false; }, { passive: true });
+    }
+
     addEventListener('pointermove', event => {
-      if (event.pointerType === 'touch' || motion.matches) return;
+      if (event.pointerType === 'touch' || motion.matches || grabbed) return;
       const x = clamp(event.clientX / width * 2 - 1, -1, 1);
       const y = clamp(event.clientY / height * 2 - 1, -1, 1);
       if (pointer.seen && Math.hypot((x - pointer.x) * width / 2, (y - pointer.y) * height / 2) < 1.5) return;
@@ -603,6 +674,7 @@
 
     const releasePointer = () => {
       pointer.movedAt = -Infinity;
+      grabbed = false;
       tilt.strength = 0;
       tilt.neutral = null;
     };
@@ -630,7 +702,7 @@
       }
     }
 
-    canvas.addEventListener('click', enableTilt);
+    art.addEventListener('click', enableTilt);
     screen.orientation?.addEventListener('change', releasePointer);
     addEventListener('orientationchange', releasePointer);
     if (window.DeviceOrientationEvent && isSecureContext &&
