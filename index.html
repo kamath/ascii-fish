@@ -32,10 +32,11 @@
     const BG = '#080d10';
     let width, height, pixelRatio, fontSize, cellW, cellH, cols, rows;
     let palette = [], atlas, tileW, tileH, frame = 0, last = 0, time = 0;
-    let scale, centerX, centerY, angle, yaw, pitch, depth;
+    let scale, centerX, centerY, angle, yaw, pitch, depth, positionX, positionY;
     let cy, sy, cp, sp, cr, sr;
     let scene = [];
     const focalLength = 1800;
+    const orbitDuration = 48;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const mix = (a, b, t) => a + (b - a) * t;
 
@@ -111,6 +112,7 @@
       field.width = cols * 3;
       field.height = rows * 3;
       buildType();
+      fitCourse();
       draw();
     }
 
@@ -134,8 +136,8 @@
       const rotated = rotate(px, py, pz);
       const cameraZ = rotated[2] + depth;
       const perspective = focalLength / (focalLength - cameraZ);
-      return [centerX + rotated[0] * scale * perspective,
-              centerY + rotated[1] * scale * perspective, cameraZ, perspective];
+      return [centerX + (rotated[0] + positionX) * scale * perspective,
+              centerY + (rotated[1] + positionY) * scale * perspective, cameraZ, perspective];
     }
 
     function shape(points, fill, color = null, lineWidth = 1, closed = true) {
@@ -152,29 +154,6 @@
     }
 
     function paintScene() {
-      // Keep the full veil of fins in view through diagonal passes and turns.
-      let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
-      for (const part of scene) for (const p of part.vertices) {
-        left = Math.min(left, p[0]); right = Math.max(right, p[0]);
-        top = Math.min(top, p[1]); bottom = Math.max(bottom, p[1]);
-      }
-      const fit = Math.min(1, width * 0.92 / (right - left), height * 0.88 / (bottom - top));
-      const marginX = width * 0.035, marginY = height * 0.05;
-      const lowX = marginX - (left - centerX) * fit;
-      const highX = width - marginX - (right - centerX) * fit;
-      const lowY = marginY - (top - centerY) * fit;
-      const highY = height - marginY - (bottom - centerY) * fit;
-      const driftX = (centerX / width - 0.51) / 0.27;
-      const driftY = (centerY / height - 0.50) / 0.27;
-      const framedX = mix(lowX, highX, 0.5 + 0.48 * Math.tanh(driftX * 1.4));
-      const framedY = mix(lowY, highY, 0.5 + 0.48 * Math.tanh(driftY * 1.4));
-      for (const part of scene) {
-        for (const p of part.vertices) {
-          p[0] = framedX + (p[0] - centerX) * fit;
-          p[1] = framedY + (p[1] - centerY) * fit;
-        }
-        part.lineWidth *= fit;
-      }
       // Sorting small patches lets the far eye and fins disappear behind
       // the body as it turns, while the near surfaces remain in front.
       scene.sort((a, b) => a.z - b.z);
@@ -291,7 +270,7 @@
           // to allow for the small normal changes caused by its swimming bend.
           const surface = skin((x + nextX) / 2, mid);
           const position = rotate(surface[0], surface[1], surface[4]);
-          const view = [-position[0], -position[1], focalLength - depth - position[2]];
+          const view = [-position[0] - positionX, -position[1] - positionY, focalLength - depth - position[2]];
           if ((n[0] * view[0] + n[1] * view[1] + n[2] * view[2]) / (length * Math.hypot(...view)) < -0.12) continue;
           const diffuse = Math.max(0, (-n[0] * 0.28 - n[1] * 0.62 + n[2] * 0.73) / length);
           const sheen = Math.pow(Math.max(0, (-n[1] * 0.30 + n[2] * 0.95) / length), 12);
@@ -342,30 +321,59 @@
     }
 
     function swim() {
-      // A continuous 3D course: close pass, banking turn, diagonal retreat,
-      // then a return from the other side. Heading follows its tangent.
-      const phase = time * TAU / 36;
+      // A broad, continuous orbit in world space. Its tangent sets the
+      // heading, so the nose leads every turn and the tail follows through.
+      const phase = time * TAU / orbitDuration;
       const portrait = clamp((1 - width / height) * 2, 0, 1);
-      const baseAngle = -0.075 - portrait * 1.495;
-      const baseW = Math.abs(Math.cos(baseAngle)) * 1050 + Math.abs(Math.sin(baseAngle)) * 700;
-      const baseH = Math.abs(Math.sin(baseAngle)) * 1050 + Math.abs(Math.cos(baseAngle)) * 700;
-      scale = Math.min(width * 0.76 / baseW, height * 0.82 / baseH);
-      const travel = mix(width, height, portrait) * 0.27;
-      const crossTravel = mix(height, width, portrait) * 0.13;
-      const courseX = Math.sin(phase) * travel;
-      const courseY = Math.sin(phase * 2) * crossTravel;
-      centerX = width * 0.51 + courseX * Math.cos(baseAngle) - courseY * Math.sin(baseAngle);
-      centerY = height * 0.50 + courseX * Math.sin(baseAngle) + courseY * Math.cos(baseAngle);
-      depth = Math.cos(phase) * 300;
-      const vx = Math.cos(phase) * travel / scale;
-      const vy = Math.cos(phase * 2) * crossTravel * 2 / scale;
-      const vz = -Math.sin(phase) * 300;
+      const baseAngle = -0.10 - portrait * 1.47;
+      const courseX = Math.sin(phase) * 360;
+      const courseY = Math.sin(phase) * 65 + Math.sin(phase * 2) * 20;
+      positionX = courseX * Math.cos(baseAngle) - courseY * Math.sin(baseAngle);
+      positionY = courseX * Math.sin(baseAngle) + courseY * Math.cos(baseAngle);
+      depth = Math.cos(phase) * 360;
+      const vx = Math.cos(phase) * 360;
+      const vy = Math.cos(phase) * 65 + Math.cos(phase * 2) * 40;
+      const vz = -Math.sin(phase) * 360;
       yaw = Math.atan2(-vz, vx);
       pitch = Math.atan2(vy, Math.hypot(vx, vz));
-      angle = baseAngle + Math.sin(phase) * 0.12;
+      angle = baseAngle + Math.sin(phase) * 0.055;
       cy = Math.cos(yaw); sy = Math.sin(yaw);
       cp = Math.cos(pitch); sp = Math.sin(pitch);
       cr = Math.cos(angle); sr = Math.sin(angle);
+    }
+
+    function fitCourse() {
+      // Frame the ENTIRE orbit once per resize. The camera never reacts to
+      // an individual fin or an approaching edge during the animation.
+      const savedTime = time;
+      scale = 1;
+      centerX = centerY = 0;
+      let extentX = 0, extentY = 0;
+      const include = p => {
+        const projected = point(...p);
+        extentX = Math.max(extentX, Math.abs(projected[0]));
+        extentY = Math.max(extentY, Math.abs(projected[1]));
+      };
+      for (let step = 0; step <= 96; step++) {
+        time = step / 96 * orbitDuration;
+        swim();
+        for (let i = 0; i <= 20; i++) {
+          const u = i / 20;
+          for (let j = 0; j <= 4; j++) {
+            const v = j / 4;
+            include(tail(u, v)); include(dorsal(u, v)); include(anal(u, v));
+            include(pectoral(u, v, -1)); include(pectoral(u, v, 1));
+          }
+          for (let j = 0; j < 16; j++) include(skin(mix(-135, 452, u), j / 16 * TAU));
+          for (const side of [-1, 1]) {
+            include([255 - u * 185, 97 + Math.sin(u * 1.65) * 172, 1, u, side * (22 + u * 15)]);
+          }
+        }
+      }
+      scale = Math.min(width * 0.43 / extentX, height * 0.42 / extentY);
+      centerX = width * 0.5;
+      centerY = height * 0.5;
+      time = savedTime;
     }
 
     function drawField() {
