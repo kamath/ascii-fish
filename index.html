@@ -18,11 +18,15 @@
     }
     footer a { color: inherit; text-decoration: none; }
     footer a:hover, footer a:focus-visible { color: #e8dab5; text-decoration: underline; text-underline-offset: 3px; }
+    .tilt-hint { display: none; }
+    @media (hover: none) and (pointer: coarse) {
+      .tilt-hint { display: block; margin-top: 4px; text-align: right; }
+    }
   </style>
 </head>
 <body>
   <canvas aria-label="A single gold-and-silver ASCII fish glides diagonally through the dark, turning and swimming toward and away from the viewer." role="img"></canvas>
-  <footer>Made with &lt;3 by <a href="https://kamath.io" target="_blank" rel="noopener noreferrer">Anirudh Kamath</a></footer>
+  <footer>Made with &lt;3 by <a href="https://kamath.io" target="_blank" rel="noopener noreferrer">Anirudh Kamath</a><span class="tilt-hint">Try tilting your phone!</span></footer>
   <script>
   (() => {
     'use strict';
