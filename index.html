@@ -4,15 +4,25 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#080d10">
-  <title>Astra Fish</title>
+  <title>ASCII Fish</title>
   <style>
     * { box-sizing: border-box; }
     html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #080d10; }
     canvas { display: block; width: 100%; height: 100%; }
+    footer {
+      position: fixed;
+      right: max(18px, env(safe-area-inset-right));
+      bottom: max(15px, env(safe-area-inset-bottom));
+      color: #8c9696;
+      font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    footer a { color: inherit; text-decoration: none; }
+    footer a:hover, footer a:focus-visible { color: #e8dab5; text-decoration: underline; text-underline-offset: 3px; }
   </style>
 </head>
 <body>
   <canvas aria-label="A single gold-and-silver ASCII fish glides diagonally through the dark, turning and swimming toward and away from the viewer." role="img"></canvas>
+  <footer>Made with &lt;3 by <a href="https://kamath.io" target="_blank" rel="noopener noreferrer">Anirudh Kamath</a></footer>
   <script>
   (() => {
     'use strict';
@@ -40,6 +50,7 @@
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const mix = (a, b, t) => a + (b - a) * t;
     const pointer = { x: 0, y: 0, smoothX: 0, smoothY: 0, movedAt: -Infinity, seen: false };
+    const tilt = { listening: false, pending: false, permission: 'unknown', neutral: null, strength: 0 };
     const pilot = {
       active: false, influence: 0, offset: [0, 0, 0], velocity: [0, 0, 0],
       yaw: 0, pitch: 0, yawRate: TAU / orbitDuration, pitchRate: 0
@@ -347,7 +358,7 @@
       const route = course();
       // Mouse events only record a target. Filtering and steering happen at
       // animation time, so event frequency and tiny hand jitters cannot jerk it.
-      const activity = Math.exp(-Math.max(0, time - pointer.movedAt - 0.45) / 1.7);
+      const activity = tilt.strength || Math.exp(-Math.max(0, time - pointer.movedAt - 0.45) / 1.7);
       pilot.influence += (activity * 0.86 - pilot.influence) * (1 - Math.exp(-dt / 0.85));
       const smoothing = 1 - Math.exp(-dt / 0.55);
       pointer.smoothX += (pointer.x - pointer.smoothX) * smoothing;
@@ -516,11 +527,7 @@
       }
       frame = requestAnimationFrame(animate);
     }
-    addEventListener('pointermove', event => {
-      if (event.pointerType === 'touch' || motion.matches) return;
-      const x = clamp(event.clientX / width * 2 - 1, -1, 1);
-      const y = clamp(event.clientY / height * 2 - 1, -1, 1);
-      if (pointer.seen && Math.hypot((x - pointer.x) * width / 2, (y - pointer.y) * height / 2) < 1.5) return;
+    function guideTo(x, y) {
       pointer.x = x; pointer.y = y;
       pointer.movedAt = time;
       if (!pointer.seen) {
@@ -532,8 +539,85 @@
         pilot.yaw = route.yaw; pilot.pitch = route.pitch;
         pilot.active = true;
       }
+    }
+
+    addEventListener('pointermove', event => {
+      if (event.pointerType === 'touch' || motion.matches) return;
+      const x = clamp(event.clientX / width * 2 - 1, -1, 1);
+      const y = clamp(event.clientY / height * 2 - 1, -1, 1);
+      if (pointer.seen && Math.hypot((x - pointer.x) * width / 2, (y - pointer.y) * height / 2) < 1.5) return;
+      tilt.strength = 0;
+      guideTo(x, y);
     }, { passive: true });
-    const releasePointer = () => { pointer.movedAt = -Infinity; };
+
+    function orientPhone(event) {
+      if (motion.matches || document.hidden || !Number.isFinite(event.beta) || !Number.isFinite(event.gamma)) return;
+      if (!tilt.neutral) {
+        tilt.neutral = { beta: event.beta, gamma: event.gamma };
+        return;
+      }
+      const difference = (value, origin) => ((value - origin + 540) % 360) - 180;
+      const beta = difference(event.beta, tilt.neutral.beta);
+      const gamma = difference(event.gamma, tilt.neutral.gamma);
+      const rotation = (screen.orientation?.angle ?? window.orientation ?? 0) * Math.PI / 180;
+      // Sensor axes belong to the device. Rotate into the visible screen so
+      // tilting right still steers right when the phone is held sideways.
+      const x = gamma * Math.cos(rotation) + beta * Math.sin(rotation);
+      const y = beta * Math.cos(rotation) - gamma * Math.sin(rotation);
+      const deadZone = value => Math.sign(value) * clamp((Math.abs(value) - 2.5) / 22, 0, 1);
+      const targetX = deadZone(x), targetY = deadZone(y);
+      const strength = clamp(Math.hypot(targetX, targetY) * 1.5, 0, 1);
+      if (strength > 0) {
+        tilt.strength = strength;
+        guideTo(targetX, targetY);
+      } else if (tilt.strength > 0) {
+        tilt.strength = 0;
+        pointer.movedAt = -Infinity;
+      }
+    }
+
+    function listenForTilt() {
+      if (tilt.listening) return;
+      addEventListener('deviceorientation', orientPhone, { passive: true });
+      tilt.listening = true;
+      tilt.permission = 'granted';
+    }
+
+    const releasePointer = () => {
+      pointer.movedAt = -Infinity;
+      tilt.strength = 0;
+      tilt.neutral = null;
+    };
+
+    async function enableTilt() {
+      const sensor = window.DeviceOrientationEvent;
+      if (!matchMedia('(pointer: coarse)').matches && navigator.maxTouchPoints === 0) return;
+      if (!sensor || !isSecureContext || motion.matches || tilt.pending || tilt.permission === 'denied') return;
+      releasePointer();
+      if (tilt.listening) return; // A later tap recalibrates the resting pose.
+      if (typeof sensor.requestPermission !== 'function') {
+        listenForTilt();
+        return;
+      }
+      // Safari requires permission to be requested directly from a user tap.
+      tilt.pending = true;
+      try {
+        tilt.permission = await sensor.requestPermission();
+        if (tilt.permission === 'granted') listenForTilt();
+      } catch {
+        // The autonomous fish remains available if motion access is blocked.
+        tilt.permission = 'unknown';
+      } finally {
+        tilt.pending = false;
+      }
+    }
+
+    canvas.addEventListener('click', enableTilt);
+    screen.orientation?.addEventListener('change', releasePointer);
+    addEventListener('orientationchange', releasePointer);
+    if (window.DeviceOrientationEvent && isSecureContext &&
+        typeof DeviceOrientationEvent.requestPermission !== 'function' &&
+        (matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0)) listenForTilt();
     document.documentElement.addEventListener('pointerleave', releasePointer);
     addEventListener('blur', releasePointer);
     addEventListener('resize', resize);
@@ -543,7 +627,7 @@
       if (document.hidden) releasePointer();
       if (!document.hidden) frame = requestAnimationFrame(animate);
     });
-    motion.addEventListener('change', draw);
+    motion.addEventListener('change', () => { releasePointer(); draw(); });
     resize();
     frame = requestAnimationFrame(animate);
   })();
