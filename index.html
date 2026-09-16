@@ -39,6 +39,11 @@
     const orbitDuration = 48;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const mix = (a, b, t) => a + (b - a) * t;
+    const pointer = { x: 0, y: 0, smoothX: 0, smoothY: 0, movedAt: -Infinity, seen: false };
+    const pilot = {
+      active: false, influence: 0, offset: [0, 0, 0], velocity: [0, 0, 0],
+      yaw: 0, pitch: 0, yawRate: TAU / orbitDuration, pitchRate: 0
+    };
 
     function buildType() {
       const candidates = [];
@@ -320,23 +325,88 @@
         1, v, side * (65 + Math.sin(v * 1.8) * (65 + Math.sin(time * 2.3) * 25))];
     }
 
-    function swim() {
+    function course() {
       // A broad, continuous orbit in world space. Its tangent sets the
       // heading, so the nose leads every turn and the tail follows through.
       const phase = time * TAU / orbitDuration;
       const portrait = clamp((1 - width / height) * 2, 0, 1);
       const baseAngle = -0.10 - portrait * 1.47;
-      const courseX = Math.sin(phase) * 360;
-      const courseY = Math.sin(phase) * 65 + Math.sin(phase * 2) * 20;
-      positionX = courseX * Math.cos(baseAngle) - courseY * Math.sin(baseAngle);
-      positionY = courseX * Math.sin(baseAngle) + courseY * Math.cos(baseAngle);
-      depth = Math.cos(phase) * 360;
+      const x = Math.sin(phase) * 360;
+      const y = Math.sin(phase) * 65 + Math.sin(phase * 2) * 20;
+      const z = Math.cos(phase) * 360;
       const vx = Math.cos(phase) * 360;
       const vy = Math.cos(phase) * 65 + Math.cos(phase * 2) * 40;
       const vz = -Math.sin(phase) * 360;
-      yaw = Math.atan2(-vz, vx);
-      pitch = Math.atan2(vy, Math.hypot(vx, vz));
+      return { phase, baseAngle, position: [x, y, z],
+        velocity: [vx, vy, vz].map(v => v * TAU / orbitDuration),
+        yaw: Math.atan2(-vz, vx), pitch: Math.atan2(vy, Math.hypot(vx, vz)) };
+    }
+
+    function updatePilot(dt) {
+      if (!pilot.active || dt <= 0) return;
+      const route = course();
+      // Mouse events only record a target. Filtering and steering happen at
+      // animation time, so event frequency and tiny hand jitters cannot jerk it.
+      const activity = Math.exp(-Math.max(0, time - pointer.movedAt - 0.45) / 1.7);
+      pilot.influence += (activity * 0.86 - pilot.influence) * (1 - Math.exp(-dt / 0.85));
+      const smoothing = 1 - Math.exp(-dt / 0.55);
+      pointer.smoothX += (pointer.x - pointer.smoothX) * smoothing;
+      pointer.smoothY += (pointer.y - pointer.smoothY) * smoothing;
+
+      // Unproject into a plane inside the water, then gently compress targets
+      // near the screen edges. This guides the fish without moving the camera.
+      const targetZ = 160;
+      const unproject = (focalLength - targetZ) / (focalLength * scale);
+      const sx = pointer.smoothX * width * 0.5 * unproject;
+      const sy = pointer.smoothY * height * 0.5 * unproject;
+      const c = Math.cos(route.baseAngle), s = Math.sin(route.baseAngle);
+      const target = [360 * Math.tanh((sx * c + sy * s) / 420),
+        130 * Math.tanh((-sx * s + sy * c) / 240), targetZ];
+      const desiredOffset = target.map((v, i) => (v - route.position[i]) * pilot.influence);
+
+      // A critically damped spring, integrated in small steps with bounded
+      // acceleration. Neither a new target nor idle handoff can teleport it.
+      const steps = Math.max(1, Math.ceil(dt * 120)), h = dt / steps;
+      for (let step = 0; step < steps; step++) {
+        const acceleration = desiredOffset.map((v, i) =>
+          (v - pilot.offset[i]) * 1.35 ** 2 - 2 * 1.35 * pilot.velocity[i]);
+        const limit = Math.min(1, 110 / (Math.hypot(...acceleration) || 1));
+        for (let i = 0; i < 3; i++) pilot.velocity[i] += acceleration[i] * limit * h;
+        const speedLimit = Math.min(1, 140 / (Math.hypot(...pilot.velocity) || 1));
+        for (let i = 0; i < 3; i++) {
+          pilot.velocity[i] *= speedLimit;
+          pilot.offset[i] += pilot.velocity[i] * h;
+        }
+      }
+
+      const velocity = route.velocity.map((v, i) => v + pilot.velocity[i]);
+      if (Math.hypot(...velocity) > 4) {
+        const desiredYaw = Math.atan2(-velocity[2], velocity[0]);
+        const desiredPitch = clamp(Math.atan2(velocity[1], Math.hypot(velocity[0], velocity[2])), -0.50, 0.50);
+        const yawError = Math.atan2(Math.sin(desiredYaw - pilot.yaw), Math.cos(desiredYaw - pilot.yaw));
+        const damping = 1 - Math.exp(-dt / 0.45);
+        pilot.yawRate += (clamp(yawError * 1.8, -0.65, 0.65) - pilot.yawRate) * damping;
+        pilot.pitchRate += (clamp((desiredPitch - pilot.pitch) * 1.8, -0.38, 0.38) - pilot.pitchRate) * damping;
+      } else {
+        pilot.yawRate *= Math.exp(-dt * 3);
+        pilot.pitchRate *= Math.exp(-dt * 3);
+      }
+      pilot.yaw += pilot.yawRate * dt;
+      pilot.pitch += pilot.pitchRate * dt;
+    }
+
+    function swim(interactive = true) {
+      const route = course();
+      const steering = interactive && pilot.active;
+      const [x, y, z] = route.position.map((v, i) => v + (steering ? pilot.offset[i] : 0));
+      const { baseAngle, phase } = route;
+      positionX = x * Math.cos(baseAngle) - y * Math.sin(baseAngle);
+      positionY = x * Math.sin(baseAngle) + y * Math.cos(baseAngle);
+      depth = z;
+      yaw = steering ? pilot.yaw : route.yaw;
+      pitch = steering ? pilot.pitch : route.pitch;
       angle = baseAngle + Math.sin(phase) * 0.055;
+      if (steering) angle -= pilot.yawRate * pilot.influence * 0.10;
       cy = Math.cos(yaw); sy = Math.sin(yaw);
       cp = Math.cos(pitch); sp = Math.sin(pitch);
       cr = Math.cos(angle); sr = Math.sin(angle);
@@ -356,7 +426,7 @@
       };
       for (let step = 0; step <= 96; step++) {
         time = step / 96 * orbitDuration;
-        swim();
+        swim(false);
         for (let i = 0; i <= 20; i++) {
           const u = i / 20;
           for (let j = 0; j <= 4; j++) {
@@ -441,14 +511,36 @@
       last = now;
       if (!motion.matches) {
         time += delta;
+        updatePilot(delta);
         draw();
       }
       frame = requestAnimationFrame(animate);
     }
+    addEventListener('pointermove', event => {
+      if (event.pointerType === 'touch' || motion.matches) return;
+      const x = clamp(event.clientX / width * 2 - 1, -1, 1);
+      const y = clamp(event.clientY / height * 2 - 1, -1, 1);
+      if (pointer.seen && Math.hypot((x - pointer.x) * width / 2, (y - pointer.y) * height / 2) < 1.5) return;
+      pointer.x = x; pointer.y = y;
+      pointer.movedAt = time;
+      if (!pointer.seen) {
+        pointer.smoothX = x; pointer.smoothY = y;
+        pointer.seen = true;
+      }
+      if (!pilot.active) {
+        const route = course();
+        pilot.yaw = route.yaw; pilot.pitch = route.pitch;
+        pilot.active = true;
+      }
+    }, { passive: true });
+    const releasePointer = () => { pointer.movedAt = -Infinity; };
+    document.documentElement.addEventListener('pointerleave', releasePointer);
+    addEventListener('blur', releasePointer);
     addEventListener('resize', resize);
     document.addEventListener('visibilitychange', () => {
       cancelAnimationFrame(frame);
       last = 0;
+      if (document.hidden) releasePointer();
       if (!document.hidden) frame = requestAnimationFrame(animate);
     });
     motion.addEventListener('change', draw);
