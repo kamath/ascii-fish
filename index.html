@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080d10">
+  <title>Astra Fish</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #080d10; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <canvas aria-label="A single gold-and-silver ASCII fish glides diagonally through the dark, turning and swimming toward and away from the viewer." role="img"></canvas>
+  <script>
+  (() => {
+    'use strict';
+
+    // Inspired by chenglou.me/pretext/variable-typographic-ascii/:
+    // measure proportional glyphs, then match their ink density AND width
+    // to a moving light field. Everything displayed here is a text glyph.
+    const canvas = document.querySelector('canvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const field = document.createElement('canvas');
+    const ink = field.getContext('2d', { willReadFrequently: true });
+    const probe = document.createElement('canvas');
+    probe.width = probe.height = 40;
+    const measure = probe.getContext('2d', { willReadFrequently: true });
+    const motion = matchMedia('(prefers-reduced-motion: reduce)');
+    const TAU = Math.PI * 2;
+    const BG = '#080d10';
+    let width, height, pixelRatio, fontSize, cellW, cellH, cols, rows;
+    let palette = [], atlas, tileW, tileH, frame = 0, last = 0, time = 0;
+    let scale, centerX, centerY, angle, yaw, pitch, depth;
+    let cy, sy, cp, sp, cr, sr;
+    let scene = [];
+    const focalLength = 1800;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const mix = (a, b, t) => a + (b - a) * t;
+
+    function buildType() {
+      const candidates = [];
+      const chars = '.`,:;\'"-~=+<>/\\|(){}[]iltrsvxYJLcoauwnzO0QXMW@&#%8';
+      for (const weight of [400, 600, 800]) {
+        for (const style of ['normal', 'italic']) {
+          const font = `${style} ${weight} ${fontSize}px Georgia, "Times New Roman", serif`;
+          measure.font = font;
+          for (const char of chars) {
+            const advance = measure.measureText(char).width;
+            measure.clearRect(0, 0, 40, 40);
+            measure.fillStyle = '#fff';
+            measure.fillText(char, 8, 24);
+            const pixels = measure.getImageData(0, 0, 40, 40).data;
+            let area = 0;
+            for (let i = 3; i < pixels.length; i += 4) area += pixels[i] / 255;
+            candidates.push({ char, font, advance, density: area / (cellW * fontSize) });
+          }
+        }
+      }
+      const maxDensity = Math.max(...candidates.map(g => g.density));
+      for (const glyph of candidates) glyph.density /= maxDensity;
+      palette = [];
+      for (let level = 0; level < 48; level++) {
+        const target = 0.09 + level / 47 * 0.89;
+        const ranked = candidates.map(glyph => ({
+          glyph,
+          score: Math.abs(glyph.density - target) * 3.5 + Math.abs(glyph.advance - cellW) / cellW * 0.48
+        })).sort((a, b) => a.score - b.score);
+        const distinct = ranked.filter((entry, i, all) => all.findIndex(other => other.glyph.char === entry.glyph.char) === i);
+        palette.push(distinct.slice(0, 4).map(entry => entry.glyph));
+      }
+
+      // Cache the measured type as a small sprite sheet, so the animation
+      // needs no per-frame DOM mutations or thousands of font rasterizations.
+      tileW = Math.ceil(fontSize * 1.8 * pixelRatio);
+      tileH = Math.ceil(fontSize * 1.6 * pixelRatio);
+      atlas = document.createElement('canvas');
+      atlas.width = tileW * 48;
+      atlas.height = tileH * 4 * 6;
+      const a = atlas.getContext('2d');
+      const colors = [[104, 156, 164], [147, 183, 179], [190, 206, 190], [218, 209, 173], [232, 194, 134], [239, 222, 184]];
+      for (let color = 0; color < colors.length; color++) {
+        for (let level = 0; level < 48; level++) {
+          for (let variant = 0; variant < 4; variant++) {
+            const glyph = palette[level][variant];
+            a.save();
+            a.translate(level * tileW + tileW / 2, (color * 4 + variant) * tileH + tileH * 0.73);
+            a.scale(pixelRatio, pixelRatio);
+            a.font = glyph.font;
+            a.textAlign = 'center';
+            a.fillStyle = `rgb(${colors[color].join(',')})`;
+            a.fillText(glyph.char, 0, 0);
+            a.restore();
+          }
+        }
+      }
+    }
+
+    function resize() {
+      width = innerWidth;
+      height = innerHeight;
+      pixelRatio = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.round(width * pixelRatio);
+      canvas.height = Math.round(height * pixelRatio);
+      fontSize = clamp(width / 175, 4.2, 10);
+      cellW = fontSize * 0.66;
+      cellH = fontSize * 1.02;
+      cols = Math.ceil(width / cellW);
+      rows = Math.ceil(height / cellH);
+      field.width = cols * 3;
+      field.height = rows * 3;
+      buildType();
+      draw();
+    }
+
+    // Model coordinates are 3D; the camera looks down the negative Z axis.
+    function rotate(x, y, z) {
+      const pitchedX = x * cp - y * sp;
+      const pitchedY = x * sp + y * cp;
+      const turnedX = pitchedX * cy + z * sy;
+      const turnedZ = -pitchedX * sy + z * cy;
+      return [turnedX * cr - pitchedY * sr, turnedX * sr + pitchedY * cr, turnedZ];
+    }
+
+    function point(x, y, fin = 0, looseness = 0, z = 0) {
+      const rear = clamp((415 - x) / 950, 0, 1);
+      const phase = time * 1.85 - rear * 5.1;
+      const px = x + Math.sin(phase + y * 0.009) * rear * rear * 9;
+      const py = y + Math.sin(phase) * (2 + 12 * rear * rear)
+        + fin * looseness * Math.sin(phase - looseness * 3.2 + x * 0.008) * 12;
+      const pz = z + Math.sin(phase) * (4 + 49 * rear * rear)
+        + fin * looseness * Math.sin(phase - looseness * 3.7 + y * 0.012) * 27;
+      const rotated = rotate(px, py, pz);
+      const cameraZ = rotated[2] + depth;
+      const perspective = focalLength / (focalLength - cameraZ);
+      return [centerX + rotated[0] * scale * perspective,
+              centerY + rotated[1] * scale * perspective, cameraZ, perspective];
+    }
+
+    function shape(points, fill, color = null, lineWidth = 1, closed = true) {
+      const vertices = points.map(p => point(...p));
+      let z = 0, perspective = 0;
+      for (const p of vertices) { z += p[2]; perspective += p[3]; }
+      scene.push({ vertices, fill, color, closed,
+        z: z / vertices.length,
+        lineWidth: lineWidth * scale * perspective / vertices.length });
+    }
+
+    function stroke(points, color, lineWidth = 1) {
+      shape(points, null, color, lineWidth, false);
+    }
+
+    function paintScene() {
+      // Keep the full veil of fins in view through diagonal passes and turns.
+      let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+      for (const part of scene) for (const p of part.vertices) {
+        left = Math.min(left, p[0]); right = Math.max(right, p[0]);
+        top = Math.min(top, p[1]); bottom = Math.max(bottom, p[1]);
+      }
+      const fit = Math.min(1, width * 0.92 / (right - left), height * 0.88 / (bottom - top));
+      const marginX = width * 0.035, marginY = height * 0.05;
+      const lowX = marginX - (left - centerX) * fit;
+      const highX = width - marginX - (right - centerX) * fit;
+      const lowY = marginY - (top - centerY) * fit;
+      const highY = height - marginY - (bottom - centerY) * fit;
+      const driftX = (centerX / width - 0.51) / 0.27;
+      const driftY = (centerY / height - 0.50) / 0.27;
+      const framedX = mix(lowX, highX, 0.5 + 0.48 * Math.tanh(driftX * 1.4));
+      const framedY = mix(lowY, highY, 0.5 + 0.48 * Math.tanh(driftY * 1.4));
+      for (const part of scene) {
+        for (const p of part.vertices) {
+          p[0] = framedX + (p[0] - centerX) * fit;
+          p[1] = framedY + (p[1] - centerY) * fit;
+        }
+        part.lineWidth *= fit;
+      }
+      // Sorting small patches lets the far eye and fins disappear behind
+      // the body as it turns, while the near surfaces remain in front.
+      scene.sort((a, b) => a.z - b.z);
+      ink.lineJoin = 'round';
+      ink.lineCap = 'round';
+      for (const part of scene) {
+        ink.beginPath();
+        for (let i = 0; i < part.vertices.length; i++) {
+          const p = part.vertices[i];
+          if (i === 0) ink.moveTo(p[0], p[1]); else ink.lineTo(p[0], p[1]);
+        }
+        if (part.closed) ink.closePath();
+        if (part.fill) { ink.fillStyle = part.fill; ink.fill(); }
+        if (part.color) {
+          ink.strokeStyle = part.color;
+          ink.lineWidth = part.lineWidth;
+          ink.stroke();
+        }
+      }
+    }
+
+    function fin(surface, count, warmth = 0) {
+      const membrane = surface;
+      surface = (u, v) => membrane(clamp(u, 0, 1), v);
+      const steps = 12;
+      for (let ray = 0; ray < count; ray++) {
+        const u = ray / count, next = (ray + 1) / count;
+        const light = 0.5 + 0.5 * Math.sin(u * 63 + Math.sin(time * 1.85 - u * 8) * 1.1);
+        const shade = 13 + light * 24;
+        const fill = `rgb(${shade + warmth * 25},${shade + 15},${shade + 18 - warmth * 12})`;
+        for (let j = 0; j < steps; j++) {
+          const v = j / steps, end = (j + 1) / steps;
+          shape([surface(u, v), surface(next, v), surface(next, end), surface(u, end)], fill, fill, 0.45);
+        }
+      }
+      for (let ray = 0; ray <= count; ray++) {
+        const u = ray / count;
+        const light = 0.5 + 0.5 * Math.sin(u * 27 + 0.5);
+        const color = `rgba(${180 + warmth * 50},${200 + warmth * 12},${198 - warmth * 35},${0.55 + light * 0.4})`;
+        for (let segment = 0; segment < 4; segment++) {
+          const points = [];
+          for (let j = 0; j <= 6; j++) points.push(surface(u, (segment + j / 6) / 4));
+          stroke(points, color, ray % 3 === 0 ? 3.2 : 2.1);
+        }
+        if (ray % 2 === 0) {
+          const branch = [];
+          for (let j = 0; j <= 12; j++) {
+            const v = 0.56 + j / 12 * 0.44;
+            branch.push(surface(u + (v - 0.56) * 0.016, v));
+          }
+          stroke(branch, 'rgba(185,205,190,0.44)', 0.8);
+        }
+        if (ray < count) {
+          const rim = [];
+          for (let j = 0; j <= 3; j++) rim.push(surface((ray + j / 3) / count, 1));
+          stroke(rim, 'rgba(198,210,183,0.55)', 1.15);
+        }
+      }
+    }
+
+    function tail(u, v) {
+      const theta = mix(-1.17, 1.17, u);
+      const scallop = Math.sin(u * Math.PI * 18) * 7 + Math.sin(u * 37 + time * 1.75) * 9;
+      const edgeX = -150 - (375 + scallop) * Math.cos(theta);
+      const edgeY = (322 + scallop) * Math.sin(theta);
+      return [mix(-113, edgeX, v), mix((u - 0.5) * 59, edgeY, v) + Math.sin(v * Math.PI) * Math.sin(u * 8 + time * 1.75) * 18, 1, v];
+    }
+
+    function dorsal(u, v) {
+      const rootX = mix(-120, 280, u);
+      const rootY = -bodyRadius(rootX) * 0.85;
+      const spread = Math.pow(Math.sin(Math.PI * u), 0.8);
+      return [rootX - v * (70 + 58 * spread), rootY - v * (12 + 164 * spread) + Math.sin(u * 42) * v * 4, 1, v];
+    }
+
+    function anal(u, v) {
+      const rootX = mix(-117, 259, u);
+      const rootY = bodyRadius(rootX) * 0.77;
+      const spread = Math.pow(Math.sin(Math.PI * u), 0.65);
+      return [rootX - v * (94 + 37 * spread), rootY + v * (10 + 173 * spread) + Math.sin(u * 48) * v * 4, 1, v];
+    }
+
+    function bodyRadius(x) {
+      const u = clamp((x + 135) / 571, 0, 1);
+      const radius = 16 + 120 * Math.pow(Math.sin(Math.PI * u), 0.88) * (0.65 + u * 0.48);
+      return radius * (1 - clamp((x - 436) / 16, 0, 1));
+    }
+
+    function skin(x, phi, lift = 0) {
+      const radius = bodyRadius(x);
+      const top = Math.sin(phi) < 0 && x > 290 ? mix(1, 0.55, clamp((x - 290) / 146, 0, 1)) : 1;
+      return [x, Math.sin(phi) * (radius + lift) * top, 0, 0,
+        Math.cos(phi) * (radius * 0.63 + lift)];
+    }
+
+    function flank(x, y, side, lift = 2) {
+      const radius = bodyRadius(x);
+      const top = y < 0 && x > 290 ? mix(1, 0.55, clamp((x - 290) / 146, 0, 1)) : 1;
+      const z = Math.sqrt(Math.max(0, 1 - (y / Math.max(1, radius * top)) ** 2)) * radius * 0.63;
+      return [x, y, 0, 0, side * (z + lift)];
+    }
+
+    function body() {
+      const rings = 38, segments = 32;
+      for (let i = 0; i < rings; i++) {
+        const x = mix(-135, 452, i / rings), nextX = mix(-135, 452, (i + 1) / rings);
+        for (let j = 0; j < segments; j++) {
+          const phi = j / segments * TAU, endPhi = (j + 1) / segments * TAU;
+          const mid = (phi + endPhi) / 2;
+          const slope = (bodyRadius(x + 1) - bodyRadius(x - 1)) / 2;
+          const n = rotate(-slope * 0.63, Math.sin(mid) * 0.63, Math.cos(mid));
+          const length = Math.hypot(...n);
+          // Omit the hidden half of the body; retain a rim at the silhouette
+          // to allow for the small normal changes caused by its swimming bend.
+          const surface = skin((x + nextX) / 2, mid);
+          const position = rotate(surface[0], surface[1], surface[4]);
+          const view = [-position[0], -position[1], focalLength - depth - position[2]];
+          if ((n[0] * view[0] + n[1] * view[1] + n[2] * view[2]) / (length * Math.hypot(...view)) < -0.12) continue;
+          const diffuse = Math.max(0, (-n[0] * 0.28 - n[1] * 0.62 + n[2] * 0.73) / length);
+          const sheen = Math.pow(Math.max(0, (-n[1] * 0.30 + n[2] * 0.95) / length), 12);
+          const light = 0.40 + diffuse * 0.59 + sheen * 0.23;
+          const belly = Math.max(0, Math.sin(mid));
+          const fleck = 0.96 + Math.sin(i * 5.17 + j * 3.31) * 0.04;
+          const color = `rgb(${Math.min(255, (224 - belly * 52) * light * fleck)},${Math.min(255, (203 - belly * 29) * light * fleck)},${Math.min(255, (150 + belly * 3) * light * fleck)})`;
+          shape([skin(x, phi), skin(nextX, phi), skin(nextX, endPhi), skin(x, endPhi)], color, color, 0.65);
+          if (i < rings - 3) {
+            const curve = [], highlight = [];
+            for (let k = 0; k <= 6; k++) {
+              const t = k / 6;
+              const scaleX = x + (nextX - x) * (0.36 + Math.sin(t * Math.PI) * 0.60);
+              curve.push(skin(scaleX, mix(phi, endPhi, t), 1.3));
+              highlight.push(skin(scaleX - 2, mix(phi, endPhi, t) - 0.008, 1.5));
+            }
+            stroke(curve, 'rgba(30,47,40,0.72)', 2.2);
+            stroke(highlight, 'rgba(255,239,186,0.40)', 1.2);
+          }
+        }
+      }
+      for (const side of [-1, 1]) {
+        const gill = [];
+        for (let i = 0; i <= 32; i++) {
+          const t = i / 32;
+          gill.push(flank(291 + 37 * Math.sin(t * Math.PI), -93 + t * 194, side));
+        }
+        stroke(gill, 'rgba(40,60,51,0.92)', 4.5);
+        stroke(gill.map(p => flank(p[0] - 6, p[1], side)), 'rgba(236,214,160,0.85)', 2.7);
+        const eye = (x, y, radius, color, lift) => {
+          const points = [];
+          for (let i = 0; i < 32; i++) points.push(flank(x + Math.cos(i / 32 * TAU) * radius, y + Math.sin(i / 32 * TAU) * radius, side, lift));
+          shape(points, color);
+        };
+        eye(375, -31, 15, '#ede4b7', 3);
+        eye(376, -31, 9.2, '#101b1d', 4);
+        eye(378.5, -35, 2.5, '#fff2cd', 5);
+        stroke([[443, 6], [426, 9], [416, 6]].map(p => flank(...p, side, 3)), '#344a43', 3);
+      }
+    }
+
+    function pectoral(u, v, side) {
+      const flutter = Math.sin(time * 2.3 - 0.7) * 0.17;
+      const a = mix(1.55, 2.94, u) + flutter;
+      const length = 148 + 38 * Math.sin(u * Math.PI);
+      return [265 + Math.cos(a) * length * v, 42 + Math.sin(a) * length * v,
+        1, v, side * (65 + Math.sin(v * 1.8) * (65 + Math.sin(time * 2.3) * 25))];
+    }
+
+    function swim() {
+      // A continuous 3D course: close pass, banking turn, diagonal retreat,
+      // then a return from the other side. Heading follows its tangent.
+      const phase = time * TAU / 36;
+      const portrait = clamp((1 - width / height) * 2, 0, 1);
+      const baseAngle = -0.075 - portrait * 1.495;
+      const baseW = Math.abs(Math.cos(baseAngle)) * 1050 + Math.abs(Math.sin(baseAngle)) * 700;
+      const baseH = Math.abs(Math.sin(baseAngle)) * 1050 + Math.abs(Math.cos(baseAngle)) * 700;
+      scale = Math.min(width * 0.76 / baseW, height * 0.82 / baseH);
+      const travel = mix(width, height, portrait) * 0.27;
+      const crossTravel = mix(height, width, portrait) * 0.13;
+      const courseX = Math.sin(phase) * travel;
+      const courseY = Math.sin(phase * 2) * crossTravel;
+      centerX = width * 0.51 + courseX * Math.cos(baseAngle) - courseY * Math.sin(baseAngle);
+      centerY = height * 0.50 + courseX * Math.sin(baseAngle) + courseY * Math.cos(baseAngle);
+      depth = Math.cos(phase) * 300;
+      const vx = Math.cos(phase) * travel / scale;
+      const vy = Math.cos(phase * 2) * crossTravel * 2 / scale;
+      const vz = -Math.sin(phase) * 300;
+      yaw = Math.atan2(-vz, vx);
+      pitch = Math.atan2(vy, Math.hypot(vx, vz));
+      angle = baseAngle + Math.sin(phase) * 0.12;
+      cy = Math.cos(yaw); sy = Math.sin(yaw);
+      cp = Math.cos(pitch); sp = Math.sin(pitch);
+      cr = Math.cos(angle); sr = Math.sin(angle);
+    }
+
+    function drawField() {
+      ink.setTransform(1, 0, 0, 1, 0, 0);
+      ink.fillStyle = '#000';
+      ink.fillRect(0, 0, field.width, field.height);
+      ink.setTransform(3 / cellW, 0, 0, 3 / cellH, 0, 0);
+      swim();
+      scene = [];
+      fin(tail, 46, 0.25);
+      fin(dorsal, 35, 0.4);
+      fin(anal, 38, 0.25);
+      body();
+      for (const side of [-1, 1]) {
+        for (let f = 0; f < 2; f++) {
+          const filament = [];
+          for (let i = 0; i <= 40; i++) {
+            const t = i / 40;
+            filament.push([255 - t * (163 + f * 22), 97 + Math.sin(t * 1.65) * (148 + f * 24), 1, t, side * (22 + t * 15)]);
+          }
+          stroke(filament, f ? '#8caaa0' : '#d5c693', f ? 1.7 : 2.6);
+        }
+        fin((u, v) => pectoral(u, v, side), 24, 0.6);
+      }
+      paintScene();
+    }
+
+    function draw() {
+      drawField();
+      const pixels = ink.getImageData(0, 0, field.width, field.height).data;
+      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = BG;
+      ctx.fillRect(0, 0, width, height);
+      const dw = tileW / pixelRatio, dh = tileH / pixelRatio;
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          // Supersampling preserves the fine fin rays between glyph centers.
+          let r = 0, g = 0, b = 0;
+          for (let sy = 0; sy < 3; sy++) {
+            let offset = ((row * 3 + sy) * field.width + col * 3) * 4;
+            for (let sx = 0; sx < 3; sx++, offset += 4) {
+              r += pixels[offset]; g += pixels[offset + 1]; b += pixels[offset + 2];
+            }
+          }
+          r /= 9; g /= 9; b /= 9;
+          const brightness = (r * 0.25 + g * 0.60 + b * 0.15) / 255;
+          if (brightness < 0.022) continue;
+          const level = clamp(Math.round(Math.pow(brightness, 0.64) * 47), 0, 47);
+          const variant = ((col * 73 ^ row * 151) >>> 0) % 4;
+          let color = r > g * 1.15 ? 4 : r > b * 1.22 ? 3 : g > r * 1.12 ? 0 : 2;
+          if (brightness > 0.74) color = 5;
+          if (color === 0 && brightness > 0.37) color = 1;
+          ctx.globalAlpha = clamp(0.48 + brightness * 0.85, 0, 1) * Math.min(1, brightness / 0.075);
+          ctx.drawImage(atlas, level * tileW, (color * 4 + variant) * tileH, tileW, tileH,
+            (col + 0.5) * cellW - dw / 2, (row + 0.55) * cellH - dh * 0.55, dw, dh);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function animate(now) {
+      if (!last) last = now;
+      const delta = Math.min((now - last) / 1000, 0.05);
+      last = now;
+      if (!motion.matches) {
+        time += delta;
+        draw();
+      }
+      frame = requestAnimationFrame(animate);
+    }
+    addEventListener('resize', resize);
+    document.addEventListener('visibilitychange', () => {
+      cancelAnimationFrame(frame);
+      last = 0;
+      if (!document.hidden) frame = requestAnimationFrame(animate);
+    });
+    motion.addEventListener('change', draw);
+    resize();
+    frame = requestAnimationFrame(animate);
+  })();
+  </script>
+</body>
+</html>
