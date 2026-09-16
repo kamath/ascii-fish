@@ -29,16 +29,17 @@
     #art {
       position: fixed; inset: 0; margin: 0; overflow: hidden;
       height: 100%; height: 100dvh;
-      background: #080d10;
       contain: strict;
       -webkit-text-size-adjust: none;
     }
-    #art div { position: absolute; left: 0; white-space: pre; }
+    #art div { position: absolute; left: 0; width: 100%; white-space: pre; contain: strict; }
     /* Every glyph sits in a box exactly one cell wide, so proportional type
        stays on the grid while the characters remain real, selectable text. */
-    #art b { display: inline-block; font-weight: 400; }
-    #art ::selection { background: rgba(232, 218, 181, 0.22); }
+    #art b { display: inline-block; font-weight: 400; text-align: center; }
+    #art b[hidden] { display: none; }
+    #art ::selection { color: #fff1cf; background: rgba(232, 218, 181, 0.22); }
     footer {
+      z-index: 1;
       position: fixed;
       right: max(18px, env(safe-area-inset-right));
       bottom: max(15px, env(safe-area-inset-bottom));
@@ -47,35 +48,52 @@
     }
     footer a { color: inherit; text-decoration: none; }
     footer a:hover, footer a:focus-visible { color: #e8dab5; text-decoration: underline; text-underline-offset: 3px; }
+    @media (max-width: 600px) {
+      footer { font-size: 10px; }
+    }
   </style>
 </head>
 <body>
-  <pre id="art" role="img" aria-label="A single gold-and-silver ASCII fish glides diagonally through the dark, turning and swimming toward and away from the viewer."></pre>
+  <pre id="art" role="img" aria-label="A gold-and-silver fish made of a passage from The Little Prince by Antoine de Saint-Exupéry swims through the dark."></pre>
   <footer>Made with &lt;3 by <a href="https://kamath.io" target="_blank" rel="noopener noreferrer">Anirudh Kamath</a></footer>
   <script>
   (() => {
     'use strict';
 
-    // Inspired by chenglou.me/pretext/variable-typographic-ascii/:
-    // measure proportional glyphs, then match their ink density AND width
-    // to a moving light field. Everything displayed here is a text glyph —
-    // the page paints no pixels of its own, so the fish can be selected,
-    // copied and pasted as the characters it is made of.
+    // The visible fish is selectable text. An offscreen light field controls
+    // its shape and shading; the characters themselves retain their word order.
     const art = document.getElementById('art');
     const sheet = document.head.appendChild(document.createElement('style'));
     const field = document.createElement('canvas');
     const ink = field.getContext('2d', { willReadFrequently: true });
     const probe = document.createElement('canvas');
-    probe.width = probe.height = 40;
+    probe.width = probe.height = 1;
     const measure = probe.getContext('2d', { willReadFrequently: true });
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
     const TAU = Math.PI * 2;
     const FAMILY = 'Georgia, "Times New Roman", serif';
+    // User-provided passage from The Little Prince. Paragraphs flow through
+    // the silhouette; preserve the original wording and punctuation.
+    const PASSAGE = `“Goodbye,” said the fox. “And now here is my secret, a very simple secret: It is only with the heart that one can see rightly; what is essential is invisible to the eye.”
+
+“What is essential is invisible to the eye,” the little prince repeated, so that he would be sure to remember.
+
+“It is the time you have wasted for your rose that makes your rose so important.”
+
+“It is the time I have wasted for my rose — ” said the little prince, so that he would be sure to remember.
+
+“Men have forgotten this truth,” said the fox. “But you must not forget it. You become responsible, forever, for what you have tamed. You are responsible for your rose…”
+
+“I am responsible for my rose,” the little prince repeated, so that he would be sure to remember.`.replace(/\s+/g, ' ').trim() + ' ';
+    // Cache each distinct character once, regardless of the passage length.
+    const CHARACTERS = [...new Set(PASSAGE)];
+    const LETTERS = Array.from(PASSAGE, char => CHARACTERS.indexOf(char));
     const TINTS = ['104,156,164', '147,183,179', '190,206,190', '218,209,173', '232,194,134', '239,222,184'];
-    const SHADES = 10;
-    const CELLS = 16000;
+    const SHADES = 24;
+    const CELLS = 14000;
     let width, height, fontSize, cellW, cellH, cols, rows;
-    let palette = [], cells = [], gaps = [], lines = [], frame = 0, last = 0, time = 0;
+    let cells = [], gaps = [], lines = [], frame = 0, last = 0, time = 0;
+    let lastPaint = 0;
     let scale, centerX, centerY, angle, yaw, pitch, depth, positionX, positionY;
     let cy, sy, cp, sp, cr, sr;
     let scene = [];
@@ -83,62 +101,21 @@
     const orbitDuration = 48;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     const mix = (a, b, t) => a + (b - a) * t;
-    const pointer = { x: 0, y: 0, smoothX: 0, smoothY: 0, movedAt: -Infinity, seen: false };
+    const pointer = { x: 0, y: 0, smoothX: 0, smoothY: 0, engaged: false, seen: false };
     let grabbed = false;
     const tilt = { listening: false, pending: false, permission: 'unknown', neutral: null, strength: 0 };
     const pilot = {
-      active: false, influence: 0, offset: [0, 0, 0], velocity: [0, 0, 0],
+      active: false, influence: 0, position: [0, 0, 0],
       yaw: 0, pitch: 0, yawRate: TAU / orbitDuration, pitchRate: 0
     };
 
-    const faces = [];
-    for (const weight of [400, 600, 800]) {
-      for (const style of ['normal', 'italic']) faces.push({ weight, style });
-    }
-    const entity = char => char === '<' ? '&lt;' : char === '>' ? '&gt;' : char === '&' ? '&amp;' : char;
+    const faces = [400, 600, 800].map(weight => ({ weight, style: 'normal' }));
 
-    function buildType() {
-      const candidates = [];
-      const chars = '.`,:;\'"-~=+<>/\\|(){}[]iltrsvxYJLcoauwnzO0QXMW@&#%8';
-      for (let face = 0; face < faces.length; face++) {
-        measure.font = `${faces[face].style} ${faces[face].weight} ${fontSize}px ${FAMILY}`;
-        for (const char of chars) {
-          const advance = measure.measureText(char).width;
-          measure.clearRect(0, 0, 40, 40);
-          measure.fillStyle = '#fff';
-          measure.fillText(char, 8, 24);
-          const pixels = measure.getImageData(0, 0, 40, 40).data;
-          let area = 0;
-          for (let i = 3; i < pixels.length; i += 4) area += pixels[i] / 255;
-          candidates.push({ char, face, advance, density: area / (cellW * fontSize) });
-        }
-      }
-      const maxDensity = Math.max(...candidates.map(g => g.density));
-      for (const glyph of candidates) glyph.density /= maxDensity;
-      palette = [];
-      for (let level = 0; level < 48; level++) {
-        const target = 0.09 + level / 47 * 0.89;
-        const ranked = candidates.map(glyph => ({
-          glyph,
-          score: Math.abs(glyph.density - target) * 3.5 + Math.abs(glyph.advance - cellW) / cellW * 0.48
-        })).sort((a, b) => a.score - b.score);
-        const distinct = ranked.filter((entry, i, all) => all.findIndex(other => other.glyph.char === entry.glyph.char) === i);
-        palette.push(distinct.slice(0, 4).map(entry => entry.glyph));
-      }
-      buildMarkup();
-    }
-
-    // The type is cached as CSS classes and ready-made markup, so a frame
-    // costs one string per row instead of thousands of style computations.
+    // Static classes and glyph descriptors are shared by every frame. Each grid
+    // row reuses a small pool of elements; empty water is one space run.
     function buildMarkup() {
-      const rules = [`#art{font:${fontSize}px/${cellH}px ${FAMILY}}`, `#art b{width:${cellW}px}`];
-      // Spacing the blanks out to a full cell each keeps a selection dragged
-      // across empty water aligned with the columns it covers.
-      measure.font = `normal 400 ${fontSize}px ${FAMILY}`;
-      const blank = cellW - measure.measureText(' ').width;
-      for (let run = 1; run <= cols; run++) {
-        rules.push(`#art b.g${run}{width:${run * cellW}px;letter-spacing:${blank}px}`);
-      }
+      const rules = [`#art{font:${fontSize}px/${cellH}px ${FAMILY}}`,
+        `#art div,#art b{height:${cellH}px}`, `#art b{width:${cellW}px}`];
       for (let face = 0; face < faces.length; face++) {
         for (let tint = 0; tint < TINTS.length; tint++) {
           for (let shade = 0; shade < SHADES; shade++) {
@@ -148,35 +125,55 @@
           }
         }
       }
+      measure.font = `normal 400 ${fontSize}px ${FAMILY}`;
+      const spacing = cellW - measure.measureText(' ').width;
+      gaps = Array.from({ length: cols + 1 }, (_, run) => {
+        rules.push(`#art b.g${run}{width:${run * cellW}px;letter-spacing:${spacing}px}`);
+        return { char: ' '.repeat(run), className: `g${run}` };
+      });
       sheet.textContent = rules.join('');
-
-      cells = new Array(48 * 4 * TINTS.length * SHADES);
-      for (let level = 0; level < 48; level++) {
-        for (let variant = 0; variant < 4; variant++) {
-          const glyph = palette[level][variant];
-          const text = entity(glyph.char);
+      cells = new Array(CHARACTERS.length * faces.length * TINTS.length * SHADES);
+      for (let letter = 0; letter < CHARACTERS.length; letter++) {
+        for (let face = 0; face < faces.length; face++) {
           for (let tint = 0; tint < TINTS.length; tint++) {
             for (let shade = 0; shade < SHADES; shade++) {
-              cells[((level * 4 + variant) * TINTS.length + tint) * SHADES + shade] =
-                `<b class=k${(glyph.face * TINTS.length + tint) * SHADES + shade}>${text}</b>`;
+              const style = (face * TINTS.length + tint) * SHADES + shade;
+              cells[letter * faces.length * TINTS.length * SHADES + style] = {
+                char: CHARACTERS[letter], className: `ink k${style}`
+              };
             }
           }
         }
       }
-      // Unlit cells are spaces, held to width by a single box per run, so a
-      // copied line keeps the picture's shape instead of collapsing to ink.
-      gaps = new Array(cols + 1);
-      for (let run = 1; run <= cols; run++) gaps[run] = `<b class=g${run}>${' '.repeat(run)}</b>`;
     }
 
     function buildLines() {
-      while (art.childElementCount > rows) art.lastElementChild.remove();
-      while (art.childElementCount < rows) art.appendChild(document.createElement('div'));
-      lines = Array.from(art.children, (node, row) => {
-        node.style.top = `${row * cellH}px`;
-        node.textContent = '';
-        return { node, html: '' };
+      const fragment = document.createDocumentFragment();
+      lines = Array.from({ length: rows }, (_, row) => {
+        const line = document.createElement('div');
+        line.style.top = `${row * cellH}px`;
+        const newline = document.createTextNode('\n');
+        line.appendChild(newline);
+        fragment.appendChild(line);
+        return { node: line, newline, slots: [], used: 0 };
       });
+      art.replaceChildren(fragment);
+    }
+
+    function writeCell(line, index, key, glyph) {
+      let slot = line.slots[index];
+      if (!slot) {
+        const node = document.createElement('b');
+        const text = document.createTextNode('');
+        node.appendChild(text);
+        line.node.insertBefore(node, line.newline);
+        slot = line.slots[index] = { node, text, key: null, char: '', className: '' };
+      }
+      if (index >= line.used) slot.node.hidden = false;
+      if (slot.key === key) return;
+      if (slot.char !== glyph.char) slot.text.data = slot.char = glyph.char;
+      if (slot.className !== glyph.className) slot.node.className = slot.className = glyph.className;
+      slot.key = key;
     }
 
     function resize() {
@@ -185,7 +182,7 @@
       // Real glyphs cost style, layout and paint, so the grid answers to a
       // cell budget rather than to the display: a larger screen is given
       // larger type instead of more boxes to lay out on every frame.
-      fontSize = clamp(Math.max(width / 120, Math.sqrt(width * height / (0.66 * 1.02 * CELLS))), 7, 20);
+      fontSize = Math.max(7, width / 165, Math.sqrt(width * height / (0.66 * 1.02 * CELLS)));
       // Layout engines keep lengths in 1/64 of a pixel. Cells that land on
       // that grid exactly cannot accumulate rounding error across a row.
       cellW = Math.round(fontSize * 0.66 * 64) / 64;
@@ -194,7 +191,7 @@
       rows = Math.ceil(height / cellH);
       field.width = cols * 3;
       field.height = rows * 3;
-      buildType();
+      buildMarkup();
       buildLines();
       fitCourse();
       draw();
@@ -225,7 +222,10 @@
     }
 
     function shape(points, fill, color = null, lineWidth = 1, closed = true) {
-      const vertices = points.map(p => point(...p));
+      projectedShape(points.map(p => point(...p)), fill, color, lineWidth, closed);
+    }
+
+    function projectedShape(vertices, fill, color = null, lineWidth = 1, closed = true) {
       let z = 0, perspective = 0;
       for (const p of vertices) { z += p[2]; perspective += p[3]; }
       scene.push({ vertices, fill, color, closed,
@@ -262,24 +262,26 @@
     function fin(surface, count, warmth = 0) {
       const membrane = surface;
       surface = (u, v) => membrane(clamp(u, 0, 1), v);
-      const steps = 12;
+      const steps = 6;
+      // Adjacent membrane patches share vertices. Project each one once.
+      const mesh = Array.from({ length: count + 1 }, (_, ray) =>
+        Array.from({ length: steps + 1 }, (_, step) => point(...surface(ray / count, step / steps))));
       for (let ray = 0; ray < count; ray++) {
-        const u = ray / count, next = (ray + 1) / count;
+        const u = ray / count;
         const light = 0.5 + 0.5 * Math.sin(u * 63 + Math.sin(time * 1.85 - u * 8) * 1.1);
         const shade = 13 + light * 24;
         const fill = `rgb(${shade + warmth * 25},${shade + 15},${shade + 18 - warmth * 12})`;
         for (let j = 0; j < steps; j++) {
-          const v = j / steps, end = (j + 1) / steps;
-          shape([surface(u, v), surface(next, v), surface(next, end), surface(u, end)], fill, fill, 0.45);
+          projectedShape([mesh[ray][j], mesh[ray + 1][j], mesh[ray + 1][j + 1], mesh[ray][j + 1]], fill, fill, 0.45);
         }
       }
       for (let ray = 0; ray <= count; ray++) {
         const u = ray / count;
         const light = 0.5 + 0.5 * Math.sin(u * 27 + 0.5);
         const color = `rgba(${180 + warmth * 50},${200 + warmth * 12},${198 - warmth * 35},${0.55 + light * 0.4})`;
-        for (let segment = 0; segment < 4; segment++) {
+        for (let segment = 0; segment < 2; segment++) {
           const points = [];
-          for (let j = 0; j <= 6; j++) points.push(surface(u, (segment + j / 6) / 4));
+          for (let j = 0; j <= 6; j++) points.push(surface(u, (segment + j / 6) / 2));
           stroke(points, color, ray % 3 === 0 ? 3.2 : 2.1);
         }
         if (ray % 2 === 0) {
@@ -341,7 +343,7 @@
     }
 
     function body() {
-      const rings = 38, segments = 32;
+      const rings = 30, segments = 24;
       for (let i = 0; i < rings; i++) {
         const x = mix(-135, 452, i / rings), nextX = mix(-135, 452, (i + 1) / rings);
         for (let j = 0; j < segments; j++) {
@@ -424,10 +426,11 @@
     function updatePilot(dt) {
       if (!pilot.active || dt <= 0) return;
       const route = course();
-      // Mouse events only record a target. Filtering and steering happen at
-      // animation time, so event frequency and tiny hand jitters cannot jerk it.
-      const activity = tilt.strength || Math.exp(-Math.max(0, time - pointer.movedAt - 0.45) / 1.7);
-      pilot.influence += (activity * 0.86 - pilot.influence) * (1 - Math.exp(-dt / 0.85));
+      // Keep a stationary cursor as the target until it leaves the page.
+      // Expiring the target after every mouse movement made the fish repeatedly
+      // chase the cursor, then turn back toward its still-moving orbit.
+      const engaged = pointer.engaged;
+      pilot.influence += ((engaged ? 1 : 0) - pilot.influence) * (1 - Math.exp(-dt / 0.85));
       const smoothing = 1 - Math.exp(-dt / 0.55);
       pointer.smoothX += (pointer.x - pointer.smoothX) * smoothing;
       pointer.smoothY += (pointer.y - pointer.smoothY) * smoothing;
@@ -441,43 +444,38 @@
       const c = Math.cos(route.baseAngle), s = Math.sin(route.baseAngle);
       const target = [360 * Math.tanh((sx * c + sy * s) / 420),
         130 * Math.tanh((-sx * s + sy * c) / 240), targetZ];
-      const desiredOffset = target.map((v, i) => (v - route.position[i]) * pilot.influence);
+      const destination = engaged ? target : route.position;
+      const displacement = destination.map((v, i) => v - pilot.position[i]);
+      const distance = Math.hypot(...displacement);
+      // Exponential arrival cannot overshoot a stationary target. Limit speed
+      // without a spring or stored momentum that can reverse the heading.
+      const travel = Math.min(1 - Math.exp(-dt * 1.15), 140 * dt / Math.max(distance, 0.001));
+      for (let i = 0; i < 3; i++) pilot.position[i] += displacement[i] * travel;
 
-      // A critically damped spring, integrated in small steps with bounded
-      // acceleration. Neither a new target nor idle handoff can teleport it.
-      const steps = Math.max(1, Math.ceil(dt * 120)), h = dt / steps;
-      for (let step = 0; step < steps; step++) {
-        const acceleration = desiredOffset.map((v, i) =>
-          (v - pilot.offset[i]) * 1.35 ** 2 - 2 * 1.35 * pilot.velocity[i]);
-        const limit = Math.min(1, 110 / (Math.hypot(...acceleration) || 1));
-        for (let i = 0; i < 3; i++) pilot.velocity[i] += acceleration[i] * limit * h;
-        const speedLimit = Math.min(1, 140 / (Math.hypot(...pilot.velocity) || 1));
-        for (let i = 0; i < 3; i++) {
-          pilot.velocity[i] *= speedLimit;
-          pilot.offset[i] += pilot.velocity[i] * h;
-        }
-      }
-
-      const velocity = route.velocity.map((v, i) => v + pilot.velocity[i]);
-      if (Math.hypot(...velocity) > 4) {
-        const desiredYaw = Math.atan2(-velocity[2], velocity[0]);
-        const desiredPitch = clamp(Math.atan2(velocity[1], Math.hypot(velocity[0], velocity[2])), -0.50, 0.50);
+      // Near arrival the direction of tiny corrections is unstable. Hold the
+      // last heading there, and turn with a bounded first-order response outside.
+      const speed = distance * travel / dt;
+      if (speed > 8) {
+        const desiredYaw = Math.atan2(-displacement[2], displacement[0]);
+        const desiredPitch = clamp(Math.atan2(displacement[1], Math.hypot(displacement[0], displacement[2])), -0.50, 0.50);
         const yawError = Math.atan2(Math.sin(desiredYaw - pilot.yaw), Math.cos(desiredYaw - pilot.yaw));
-        const damping = 1 - Math.exp(-dt / 0.45);
-        pilot.yawRate += (clamp(yawError * 1.8, -0.65, 0.65) - pilot.yawRate) * damping;
-        pilot.pitchRate += (clamp((desiredPitch - pilot.pitch) * 1.8, -0.38, 0.38) - pilot.pitchRate) * damping;
+        const turn = 1 - Math.exp(-dt * 2.2);
+        const yawStep = clamp(yawError * turn, -0.65 * dt, 0.65 * dt);
+        const pitchStep = clamp((desiredPitch - pilot.pitch) * turn, -0.38 * dt, 0.38 * dt);
+        pilot.yaw += yawStep;
+        pilot.pitch += pitchStep;
+        pilot.yawRate = yawStep / dt;
+        pilot.pitchRate = pitchStep / dt;
       } else {
         pilot.yawRate *= Math.exp(-dt * 3);
         pilot.pitchRate *= Math.exp(-dt * 3);
       }
-      pilot.yaw += pilot.yawRate * dt;
-      pilot.pitch += pilot.pitchRate * dt;
     }
 
     function swim(interactive = true) {
       const route = course();
       const steering = interactive && pilot.active;
-      const [x, y, z] = route.position.map((v, i) => v + (steering ? pilot.offset[i] : 0));
+      const [x, y, z] = steering ? pilot.position : route.position;
       const { baseAngle, phase } = route;
       positionX = x * Math.cos(baseAngle) - y * Math.sin(baseAngle);
       positionY = x * Math.sin(baseAngle) + y * Math.cos(baseAngle);
@@ -553,8 +551,10 @@
     function draw() {
       drawField();
       const pixels = ink.getImageData(0, 0, field.width, field.height).data;
+      let letter = 0;
       for (let row = 0; row < rows; row++) {
-        let html = '', gap = 0;
+        const line = lines[row];
+        let used = 0, gap = 0;
         for (let col = 0; col < cols; col++) {
           // Supersampling preserves the fine fin rays between glyph centers.
           let r = 0, g = 0, b = 0;
@@ -567,32 +567,30 @@
           r /= 9; g /= 9; b /= 9;
           const brightness = (r * 0.25 + g * 0.60 + b * 0.15) / 255;
           if (brightness < 0.022) { gap++; continue; }
-          const level = clamp(Math.round(Math.pow(brightness, 0.64) * 47), 0, 47);
-          const variant = ((col * 73 ^ row * 151) >>> 0) % 4;
+          const face = brightness > 0.55 ? 2 : brightness > 0.20 ? 1 : 0;
           let tint = r > g * 1.15 ? 4 : r > b * 1.22 ? 3 : g > r * 1.12 ? 0 : 2;
           if (brightness > 0.74) tint = 5;
           if (tint === 0 && brightness > 0.37) tint = 1;
           const opacity = clamp(0.48 + brightness * 0.85, 0, 1) * Math.min(1, brightness / 0.075);
           const shade = clamp(Math.ceil(opacity * SHADES) - 1, 0, SHADES - 1);
-          if (gap) { html += gaps[gap]; gap = 0; }
-          html += cells[((level * 4 + variant) * TINTS.length + tint) * SHADES + shade];
+          // Advance through the passage only inside the silhouette. Its words
+          // read left to right, continuing across rows and repeating as needed.
+          const key = ((LETTERS[letter] * faces.length + face) * TINTS.length + tint) * SHADES + shade;
+          letter = (letter + 1) % LETTERS.length;
+          if (gap) { writeCell(line, used++, -gap, gaps[gap]); gap = 0; }
+          writeCell(line, used++, key, cells[key]);
         }
-        // A literal newline ends each row, so a selection copied out of the
-        // page arrives as lines of ASCII rather than one endless string.
-        html += '\n';
-        // Most rows repeat between frames; rewriting only the changed ones
-        // keeps the parser and the layout engine off the critical path.
-        const line = lines[row];
-        if (line.html !== html) {
-          line.node.innerHTML = html;
-          line.html = html;
+        for (let i = used; i < line.used; i++) {
+          const slot = line.slots[i];
+          slot.node.hidden = true;
+          slot.text.data = slot.char = '';
+          slot.key = null;
         }
+        line.used = used;
       }
     }
 
-    // A moving picture cannot be read, let alone selected: each frame replaces
-    // the rows a selection points at. So the fish holds still while it is held
-    // or while any of its characters are selected, and swims on when released.
+    // Hold the picture while selecting its characters so copying is stable.
     function still() {
       if (grabbed) return true;
       const selection = getSelection();
@@ -607,25 +605,32 @@
       if (!motion.matches && !still()) {
         time += delta;
         updatePilot(delta);
-        draw();
+        // Keep steering at display cadence, but avoid drawing 120+ times per
+        // second on high-refresh desktops. Preserve the cadence remainder.
+        const elapsed = now - lastPaint;
+        if (elapsed >= 1000 / 60 - 0.5) {
+          draw();
+          lastPaint = now - Math.max(0, (elapsed + 0.5) % (1000 / 60) - 0.5);
+        }
       }
       frame = requestAnimationFrame(animate);
     }
     function guideTo(x, y) {
       pointer.x = x; pointer.y = y;
-      pointer.movedAt = time;
+      pointer.engaged = true;
       if (!pointer.seen) {
         pointer.smoothX = x; pointer.smoothY = y;
         pointer.seen = true;
       }
       if (!pilot.active) {
         const route = course();
+        pilot.position = route.position.slice();
         pilot.yaw = route.yaw; pilot.pitch = route.pitch;
         pilot.active = true;
       }
     }
 
-    addEventListener('pointerdown', () => { grabbed = true; }, { passive: true });
+    art.addEventListener('pointerdown', event => { grabbed = event.pointerType !== 'touch'; }, { passive: true });
     for (const event of ['pointerup', 'pointercancel']) {
       addEventListener(event, () => { grabbed = false; }, { passive: true });
     }
@@ -661,7 +666,7 @@
         guideTo(targetX, targetY);
       } else if (tilt.strength > 0) {
         tilt.strength = 0;
-        pointer.movedAt = -Infinity;
+        pointer.engaged = false;
       }
     }
 
@@ -673,7 +678,7 @@
     }
 
     const releasePointer = () => {
-      pointer.movedAt = -Infinity;
+      pointer.engaged = false;
       grabbed = false;
       tilt.strength = 0;
       tilt.neutral = null;
@@ -710,7 +715,8 @@
         (matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0)) listenForTilt();
     document.documentElement.addEventListener('pointerleave', releasePointer);
     addEventListener('blur', releasePointer);
-    addEventListener('resize', resize);
+    let resizeTimer;
+    addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(resize, 120); });
     document.addEventListener('visibilitychange', () => {
       cancelAnimationFrame(frame);
       last = 0;
