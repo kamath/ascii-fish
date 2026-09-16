@@ -6,23 +6,23 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#080d10">
   <title>ASCII Fish</title>
-  <meta name="description" content="An animated ascii fish">
+  <meta name="description" content="An animated ascii fish swimming through a page of The Little Prince">
   <link rel="canonical" href="https://ascii-fish.dev/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="ASCII Fish">
   <meta property="og:title" content="ASCII Fish">
-  <meta property="og:description" content="An animated ascii fish">
+  <meta property="og:description" content="An animated ascii fish swimming through a page of The Little Prince">
   <meta property="og:url" content="https://ascii-fish.dev/">
   <meta property="og:image" content="https://ascii-fish.dev/og.png">
   <meta property="og:image:type" content="image/png">
   <meta property="og:image:width" content="1440">
   <meta property="og:image:height" content="900">
-  <meta property="og:image:alt" content="An ASCII-art fish rendered in gold and silver characters on a dark background.">
+  <meta property="og:image:alt" content="An ASCII-art fish rendered in gold and silver characters, swimming through a dim page of text from The Little Prince.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="ASCII Fish">
-  <meta name="twitter:description" content="An animated ascii fish">
+  <meta name="twitter:description" content="An animated ascii fish swimming through a page of The Little Prince">
   <meta name="twitter:image" content="https://ascii-fish.dev/og.png">
-  <meta name="twitter:image:alt" content="An ASCII-art fish rendered in gold and silver characters on a dark background.">
+  <meta name="twitter:image:alt" content="An ASCII-art fish rendered in gold and silver characters, swimming through a dim page of text from The Little Prince.">
   <style>
     * { box-sizing: border-box; }
     html, body { width: 100%; height: 100%; min-height: 100dvh; margin: 0; overflow: hidden; background: #080d10; color-scheme: dark; }
@@ -37,6 +37,9 @@
     /* Every glyph sits in a box exactly one cell wide, so proportional type
        stays on the grid while the characters remain real, selectable text. */
     #art b { display: inline-block; font-weight: 400; }
+    /* The passage the fish swims through is set in a fixed-pitch face, so a
+       whole run of it holds the grid as plain text without a box per letter. */
+    #art i { font-style: normal; }
     #art ::selection { background: rgba(232, 218, 181, 0.22); }
     footer {
       position: fixed;
@@ -44,14 +47,19 @@
       bottom: max(15px, env(safe-area-inset-bottom));
       color: #8c9696;
       font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-align: right;
     }
+    footer cite { display: block; color: #5e6c6e; font-style: normal; }
     footer a { color: inherit; text-decoration: none; }
     footer a:hover, footer a:focus-visible { color: #e8dab5; text-decoration: underline; text-underline-offset: 3px; }
   </style>
 </head>
 <body>
-  <pre id="art" role="img" aria-label="A single gold-and-silver ASCII fish glides diagonally through the dark, turning and swimming toward and away from the viewer."></pre>
-  <footer>Made with &lt;3 by <a href="https://kamath.io" target="_blank" rel="noopener noreferrer">Anirudh Kamath</a></footer>
+  <pre id="art" role="img" aria-label="A single gold-and-silver ASCII fish glides diagonally through a dim page of text from The Little Prince, turning and swimming toward and away from the viewer."></pre>
+  <footer>
+    <cite>The Little Prince &middot; Antoine de Saint-Exup&eacute;ry</cite>
+    Made with &lt;3 by <a href="https://kamath.io" target="_blank" rel="noopener noreferrer">Anirudh Kamath</a>
+  </footer>
   <script>
   (() => {
     'use strict';
@@ -74,8 +82,33 @@
     const TINTS = ['104,156,164', '147,183,179', '190,206,190', '218,209,173', '232,194,134', '239,222,184'];
     const SHADES = 10;
     const CELLS = 16000;
+    // The water the fish swims in is a passage about a thing that is hidden
+    // and makes everything around it beautiful, set as one unbroken current.
+    // The fish is stamped over the words it happens to be swimming across.
+    const PASSAGE = [
+      '\u201CWhat makes the desert beautiful,\u201D said the little prince, \u201Cis that somewhere it hides a well.\u201D',
+      'I was surprised to understand, all at once, that mysterious radiance of the sand.',
+      'When I was a little boy I lived in an old house, and the legend went that a treasure was buried in it.',
+      'Of course no one was ever able to find it, and perhaps no one ever even looked for it.',
+      'But it cast a spell over the whole house. My house was hiding a secret in the depths of its heart\u2026',
+      '\u201CYes,\u201D I said to the little prince, \u201Cwhether it is a house, the stars or the desert, what makes them beautiful is invisible!\u201D',
+      '\u201CI am glad,\u201D he said, \u201Cthat you agree with my fox.\u201D',
+      'As the little prince was falling asleep I took him in my arms and set out walking again.',
+      'I was moved. It seemed to me that I was carrying a fragile treasure,',
+      'that there was nothing more fragile on all the Earth.',
+      'I looked, by the light of the moon, at that pale forehead, at those closed eyes,',
+      'at those locks of hair trembling in the wind, and I said to myself:',
+      'what I see here is only a shell. What is most important is invisible\u2026',
+      '\u2022 Antoine de Saint-Exup\u00E9ry, The Little Prince, chapter XXIV \u2022'
+    ].join(' ').split(' ');
+    const MONO = '"Courier New", Courier, ui-monospace, monospace';
+    const WATER = '122,156,161';
+    const TIDES = 7;
+    const WAKE = 4;
     let width, height, fontSize, cellW, cellH, cols, rows;
-    let palette = [], cells = [], gaps = [], lines = [], frame = 0, last = 0, time = 0;
+    let palette = [], cells = [], lines = [], frame = 0, last = 0, time = 0;
+    let verses = [], calm = [], shore;
+    let tone, luma, blurred, wake, rowLight, rowWake;
     let scale, centerX, centerY, angle, yaw, pitch, depth, positionX, positionY;
     let cy, sy, cp, sp, cr, sr;
     let scene = [];
@@ -95,7 +128,8 @@
     for (const weight of [400, 600, 800]) {
       for (const style of ['normal', 'italic']) faces.push({ weight, style });
     }
-    const entity = char => char === '<' ? '&lt;' : char === '>' ? '&gt;' : char === '&' ? '&amp;' : char;
+    const entity = text => text.replace(/[<>&]/g, char =>
+      char === '<' ? '&lt;' : char === '>' ? '&gt;' : '&amp;');
 
     function buildType() {
       const candidates = [];
@@ -132,13 +166,10 @@
     // costs one string per row instead of thousands of style computations.
     function buildMarkup() {
       const rules = [`#art{font:${fontSize}px/${cellH}px ${FAMILY}}`, `#art b{width:${cellW}px}`];
-      // Spacing the blanks out to a full cell each keeps a selection dragged
-      // across empty water aligned with the columns it covers.
-      measure.font = `normal 400 ${fontSize}px ${FAMILY}`;
-      const blank = cellW - measure.measureText(' ').width;
-      for (let run = 1; run <= cols; run++) {
-        rules.push(`#art b.g${run}{width:${run * cellW}px;letter-spacing:${blank}px}`);
-      }
+      // A fixed pitch spaced out to a full cell keeps every letter of the
+      // passage on the grid, so a run of it needs no box of its own.
+      measure.font = `normal 400 ${fontSize}px ${MONO}`;
+      rules.push(`#art i{font-family:${MONO};letter-spacing:${cellW - measure.measureText('n').width}px}`);
       for (let face = 0; face < faces.length; face++) {
         for (let tint = 0; tint < TINTS.length; tint++) {
           for (let shade = 0; shade < SHADES; shade++) {
@@ -147,6 +178,11 @@
               `color:rgba(${TINTS[tint]},${(shade + 1) / SHADES})}`);
           }
         }
+      }
+      // The page gives way to the fish: the closer the light of it falls to a
+      // word, the further that word fades, so nothing crowds the silhouette.
+      for (let tide = 0; tide < TIDES; tide++) {
+        rules.push(`#art i.w${tide}{color:rgba(${WATER},${(0.19 - tide / (TIDES - 1) * 0.165).toFixed(3)})}`);
       }
       sheet.textContent = rules.join('');
 
@@ -163,10 +199,57 @@
           }
         }
       }
-      // Unlit cells are spaces, held to width by a single box per run, so a
-      // copied line keeps the picture's shape instead of collapsing to ink.
-      gaps = new Array(cols + 1);
-      for (let run = 1; run <= cols; run++) gaps[run] = `<b class=g${run}>${' '.repeat(run)}</b>`;
+    }
+
+    const stream = (text, tide) => text ? `<i class=w${tide}>${text}</i>` : '';
+
+    // The passage is poured into the grid once per resize and then stays put:
+    // moving text cannot be read, and the reader should be able to follow a
+    // line straight through the fish and out the other side.
+    function buildVerses() {
+      verses = [];
+      calm = [];
+      // The passage is a thing glimpsed in deep water, not a printed page, so
+      // it is let go of at the edges of the screen rather than cut off there.
+      shore = new Uint8Array(cols * rows);
+      const marginX = Math.max(3, cols * 0.07), marginY = Math.max(2, rows * 0.09);
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const near = Math.min((col + 0.5) / marginX, (cols - 0.5 - col) / marginX,
+            (row + 0.5) / marginY, (rows - 0.5 - row) / marginY);
+          shore[row * cols + col] = Math.round((1 - clamp(near, 0, 1)) * (TIDES - 1));
+        }
+      }
+      for (let row = 0, word = 0; row < rows; row++) {
+        let verse = '';
+        while (true) {
+          const next = PASSAGE[word % PASSAGE.length];
+          if (verse.length + (verse ? 1 : 0) + next.length > cols) {
+            // A column count narrower than a single word still has to advance.
+            if (verse) break;
+            verse = next.slice(0, cols);
+          } else {
+            verse += (verse ? ' ' : '') + next;
+          }
+          word++;
+        }
+        // Every column carries a character, so a line copied out of the page
+        // keeps its shape without anything having to stand in for blank water.
+        verse = verse.padEnd(cols, ' ');
+        verses.push(verse);
+        // Rows the fish is nowhere near are identical from frame to frame, so
+        // each one keeps its finished markup and is never built again.
+        let html = '', run = '', tide = shore[row * cols];
+        for (let col = 0; col < cols; col++) {
+          if (shore[row * cols + col] !== tide) {
+            html += stream(entity(run), tide);
+            run = '';
+            tide = shore[row * cols + col];
+          }
+          run += verse[col];
+        }
+        calm.push(html + stream(entity(run), tide) + '\n');
+      }
     }
 
     function buildLines() {
@@ -194,8 +277,15 @@
       rows = Math.ceil(height / cellH);
       field.width = cols * 3;
       field.height = rows * 3;
+      tone = new Float32Array(cols * rows * 3);
+      luma = new Float32Array(cols * rows);
+      blurred = new Float32Array(cols * rows);
+      wake = new Float32Array(cols * rows);
+      rowLight = new Float32Array(rows);
+      rowWake = new Float32Array(rows);
       buildType();
       buildLines();
+      buildVerses();
       fitCourse();
       draw();
     }
@@ -550,11 +640,10 @@
       paintScene();
     }
 
-    function draw() {
-      drawField();
+    function sampleLight() {
       const pixels = ink.getImageData(0, 0, field.width, field.height).data;
       for (let row = 0; row < rows; row++) {
-        let html = '', gap = 0;
+        let brightest = 0;
         for (let col = 0; col < cols; col++) {
           // Supersampling preserves the fine fin rays between glyph centers.
           let r = 0, g = 0, b = 0;
@@ -564,9 +653,74 @@
               r += pixels[offset]; g += pixels[offset + 1]; b += pixels[offset + 2];
             }
           }
-          r /= 9; g /= 9; b /= 9;
+          const cell = row * cols + col;
+          tone[cell * 3] = r /= 9;
+          tone[cell * 3 + 1] = g /= 9;
+          tone[cell * 3 + 2] = b /= 9;
           const brightness = (r * 0.25 + g * 0.60 + b * 0.15) / 255;
-          if (brightness < 0.022) { gap++; continue; }
+          luma[cell] = brightness;
+          if (brightness > brightest) brightest = brightness;
+        }
+        rowLight[row] = brightest;
+      }
+    }
+
+    // How near the fish each cell of the page lies, as a separable box blur of
+    // its light over the grid. The falling away of the words then has a soft
+    // edge a few cells wide instead of stopping at the silhouette.
+    function spreadLight() {
+      const reach = 2, span = reach * 2 + 1;
+      for (let row = 0; row < rows; row++) {
+        const start = row * cols;
+        let sum = 0;
+        for (let col = -reach; col <= reach; col++) sum += luma[start + clamp(col, 0, cols - 1)];
+        for (let col = 0; col < cols; col++) {
+          blurred[start + col] = sum / span;
+          sum += luma[start + clamp(col + reach + 1, 0, cols - 1)] - luma[start + clamp(col - reach, 0, cols - 1)];
+        }
+      }
+      rowWake.fill(0);
+      for (let col = 0; col < cols; col++) {
+        let sum = 0;
+        for (let row = -reach; row <= reach; row++) sum += blurred[clamp(row, 0, rows - 1) * cols + col];
+        for (let row = 0; row < rows; row++) {
+          const near = sum / span;
+          wake[row * cols + col] = near;
+          if (near > rowWake[row]) rowWake[row] = near;
+          sum += blurred[clamp(row + reach + 1, 0, rows - 1) * cols + col] -
+            blurred[clamp(row - reach, 0, rows - 1) * cols + col];
+        }
+      }
+    }
+
+    function draw() {
+      drawField();
+      sampleLight();
+      spreadLight();
+      // Below this the fish is too far off to disturb a word of the passage.
+      const untouched = 0.5 / (WAKE * (TIDES - 1));
+      for (let row = 0; row < rows; row++) {
+        if (rowLight[row] < 0.022 && rowWake[row] < untouched) {
+          write(row, calm[row]);
+          continue;
+        }
+        let html = '', run = '', tide = 0;
+        const verse = verses[row];
+        for (let col = 0; col < cols; col++) {
+          const cell = row * cols + col;
+          const brightness = luma[cell];
+          if (brightness < 0.022) {
+            // Consecutive letters standing in the same light travel together
+            // as one run of text, which is what keeps the page cheap to draw.
+            const level = Math.max(shore[cell],
+              clamp(Math.round(wake[cell] * WAKE * (TIDES - 1)), 0, TIDES - 1));
+            if (run && level !== tide) { html += stream(entity(run), tide); run = ''; }
+            tide = level;
+            run += verse[col];
+            continue;
+          }
+          if (run) { html += stream(entity(run), tide); run = ''; }
+          const r = tone[cell * 3], g = tone[cell * 3 + 1], b = tone[cell * 3 + 2];
           const level = clamp(Math.round(Math.pow(brightness, 0.64) * 47), 0, 47);
           const variant = ((col * 73 ^ row * 151) >>> 0) % 4;
           let tint = r > g * 1.15 ? 4 : r > b * 1.22 ? 3 : g > r * 1.12 ? 0 : 2;
@@ -574,19 +728,21 @@
           if (tint === 0 && brightness > 0.37) tint = 1;
           const opacity = clamp(0.48 + brightness * 0.85, 0, 1) * Math.min(1, brightness / 0.075);
           const shade = clamp(Math.ceil(opacity * SHADES) - 1, 0, SHADES - 1);
-          if (gap) { html += gaps[gap]; gap = 0; }
           html += cells[((level * 4 + variant) * TINTS.length + tint) * SHADES + shade];
         }
         // A literal newline ends each row, so a selection copied out of the
-        // page arrives as lines of ASCII rather than one endless string.
-        html += '\n';
-        // Most rows repeat between frames; rewriting only the changed ones
-        // keeps the parser and the layout engine off the critical path.
-        const line = lines[row];
-        if (line.html !== html) {
-          line.node.innerHTML = html;
-          line.html = html;
-        }
+        // page arrives as lines of text rather than one endless string.
+        write(row, html + stream(entity(run), tide) + '\n');
+      }
+    }
+
+    // Most rows repeat between frames; rewriting only the changed ones keeps
+    // the parser and the layout engine off the critical path.
+    function write(row, html) {
+      const line = lines[row];
+      if (line.html !== html) {
+        line.node.innerHTML = html;
+        line.html = html;
       }
     }
 
